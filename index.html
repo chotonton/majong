@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>麻雀セット 出欠確認</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-inner">
+      <a href="?" class="brand">
+        <span class="brand-tile">發</span>
+        <span>麻雀セット出欠</span>
+      </a>
+      <button id="btn-go-create" class="btn btn-sm btn-outline-light" type="button">＋ 新規作成</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- API URL未設定警告 -->
+    <div id="setup-warning" class="card warning-card hidden">
+      <h2>初期設定が必要です</h2>
+      <p><code>engine.js</code> の先頭にある <code>GAS_API_URL</code> に、Google Apps ScriptのウェブアプリURLを設定してください。</p>
+    </div>
+
+    <!-- エラー表示ビュー -->
+    <section id="view-error" class="card error-card hidden">
+      <h2>読み込みエラー</h2>
+      <p id="error-message"></p>
+      <div class="actions-row">
+        <a href="?" class="btn btn-primary">イベント作成画面へ</a>
+      </div>
+    </section>
+
+    <!-- =====================================
+         ビュー1：イベント作成画面
+    ===================================== -->
+    <section id="view-create" class="hidden">
+      <div class="card">
+        <h1 class="section-title">セットイベントを作成</h1>
+        <p class="muted-text">作成すると「招待用URL（人数のみ表示）」と「幹事用URL（名前・条件メモ確認）」が発行されます。</p>
+
+        <!-- モード切替 -->
+        <div class="mode-tabs" role="tablist">
+          <button type="button" class="mode-tab active" data-mode="single">
+            <strong>単日開催</strong>
+            <span>1件 / 複数日を一括作成</span>
+          </button>
+          <button type="button" class="mode-tab" data-mode="multi">
+            <strong>複数候補日</strong>
+            <span>1イベントで日程調整</span>
+          </button>
+        </div>
+
+        <form id="create-form">
+          <div class="form-group">
+            <label for="ev-title">イベント名 <span class="req">必須</span></label>
+            <input type="text" id="ev-title" placeholder="例：週末セット麻雀" required />
+          </div>
+
+          <div class="form-row">
+            <div class="form-group flex-2">
+              <label for="ev-location">場所（雀荘名・エリアなど）</label>
+              <input type="text" id="ev-location" placeholder="例：雀荘〇〇 渋谷店" />
+            </div>
+            <div class="form-group flex-1">
+              <label for="ev-capacity">定員（名）</label>
+              <div class="capacity-input-wrap">
+                <input type="number" id="ev-capacity" value="4" min="1" max="99" required />
+                <div class="quick-chips">
+                  <button type="button" class="chip cap-chip" data-cap="3">3人</button>
+                  <button type="button" class="chip cap-chip" data-cap="4">4人</button>
+                  <button type="button" class="chip cap-chip" data-cap="8">8人</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="ev-auto-close" checked />
+              <span>定員に達したら自動で「満員（キャンセル待ち）」にして新規参加を締め切る</span>
+            </label>
+          </div>
+
+          <!-- 日程入力エリア（単日モード：1件〜複数一括） -->
+          <div id="single-dates-area" class="dates-panel">
+            <div class="dates-panel-head">
+              <label>開催日時 <span class="req">必須</span></label>
+              <span class="hint-badge">複数追加すると各日ごとに独立イベントを同時作成</span>
+            </div>
+            <div id="single-rows"></div>
+            <button type="button" id="btn-add-single-row" class="btn btn-secondary btn-sm btn-block">
+              ＋ 別日の単日イベントを同時に追加
+            </button>
+          </div>
+
+          <!-- 日程入力エリア（複数候補日：日程調整モード） -->
+          <div id="multi-dates-area" class="dates-panel hidden">
+            <div class="dates-panel-head">
+              <label>候補日時リスト <span class="req">必須</span></label>
+              <span class="hint-badge">参加者が各日に ◯ / △ / ✕ で回答</span>
+            </div>
+            <div id="multi-rows"></div>
+            <button type="button" id="btn-add-multi-row" class="btn btn-secondary btn-sm btn-block">
+              ＋ 候補日を追加
+            </button>
+          </div>
+
+          <div class="form-group">
+            <label for="ev-note">詳細メモ（招待画面に表示されます）</label>
+            <textarea id="ev-note" rows="3" placeholder="例：ノーレート・赤あり。途中参加OKです！"></textarea>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-lg btn-block">イベントを作成する</button>
+        </form>
+      </div>
+
+      <!-- 作成完了結果エリア -->
+      <div id="create-result" class="card result-card hidden">
+        <h2 class="section-title">イベントを作成しました</h2>
+        <p class="muted-text">幹事用URLはこの端末に自動保存されました。フレンドへは「招待URL」をLINEで送信してください。</p>
+        <div id="batch-line-wrap" class="batch-line-wrap hidden">
+          <button type="button" id="btn-batch-line-share" class="btn btn-line btn-block">
+            作成した全日程をまとめてLINEで送る
+          </button>
+        </div>
+        <div id="created-list" class="created-list"></div>
+      </div>
+
+      <!-- この端末で作ったイベント一覧（幹事ショートカット） -->
+      <div id="my-events-section" class="card hidden">
+        <div class="card-head-row">
+          <h2 class="section-title">自分が作成したイベント（幹事用）</h2>
+          <button type="button" id="btn-clear-history" class="btn-text-danger">履歴クリア</button>
+        </div>
+        <div id="my-events-list" class="my-events-list"></div>
+      </div>
+    </section>
+
+    <!-- =====================================
+         ビュー2：招待回答画面（ゲスト用）
+    ===================================== -->
+    <section id="view-guest" class="hidden">
+      <div class="card event-hero">
+        <div class="hero-badges" id="guest-badges"></div>
+        <h1 id="guest-title" class="event-title"></h1>
+        <div class="meta-grid" id="guest-meta"></div>
+        <div id="guest-note-box" class="event-note hidden"></div>
+      </div>
+
+      <!-- 人数サマリー（名前は非表示） -->
+      <div class="card">
+        <div class="card-head-row">
+          <h2 class="section-title">現在の参加状況</h2>
+          <button type="button" id="btn-guest-refresh" class="btn btn-sm btn-secondary">最新に更新</button>
+        </div>
+        <div id="guest-status-area"></div>
+        <p class="privacy-note">※参加者の名前・条件メモは幹事のみ確認できます。</p>
+      </div>
+
+      <!-- 回答フォーム -->
+      <div class="card">
+        <h2 class="section-title" id="guest-form-title">出欠を回答する</h2>
+        <div id="guest-closed-banner" class="banner banner-closed hidden"></div>
+
+        <form id="guest-form">
+          <div class="form-group">
+            <label for="guest-name">あなたの名前（ニックネーム可） <span class="req">必須</span></label>
+            <input type="text" id="guest-name" placeholder="例：タカシ" required />
+          </div>
+
+          <div id="guest-answer-inputs"></div>
+
+          <div class="form-group">
+            <label for="guest-condition-memo">条件メモ（任意・幹事のみ閲覧）</label>
+            <div class="quick-chips memo-chips">
+              <button type="button" class="chip memo-chip" data-text="途中から合流可">途中から合流可</button>
+              <button type="button" class="chip memo-chip" data-text="終電まで">終電まで</button>
+              <button type="button" class="chip memo-chip" data-text="3麻でもOK">3麻でもOK</button>
+              <button type="button" class="chip memo-chip" data-text="時間調整相談">時間調整相談</button>
+            </div>
+            <textarea id="guest-condition-memo" rows="2" placeholder="例：20時から合流できます / 23時上がり希望"></textarea>
+          </div>
+
+          <button type="submit" id="btn-guest-submit" class="btn btn-primary btn-lg btn-block">回答を送信する</button>
+          <p id="guest-saved-hint" class="saved-hint hidden">回答済みです。内容を書き換えて再送信すると上書き更新できます。</p>
+        </form>
+      </div>
+    </section>
+
+    <!-- =====================================
+         ビュー3：幹事専用管理画面
+    ===================================== -->
+    <section id="view-admin" class="hidden">
+      <div class="card admin-hero">
+        <div class="hero-badges">
+          <span class="badge badge-admin">幹事専用ページ</span>
+          <span id="admin-status-badge" class="badge"></span>
+        </div>
+        <h1 id="admin-title" class="event-title"></h1>
+        <div class="meta-grid" id="admin-meta"></div>
+        <div id="admin-note-box" class="event-note hidden"></div>
+
+        <!-- LINE送信＆URLコピー -->
+        <div class="admin-share-box">
+          <button type="button" id="btn-admin-line-share" class="btn btn-line btn-lg btn-block">
+            LINEでフレンドに追加送信する
+          </button>
+          <div class="share-sub-btns">
+            <button type="button" id="btn-copy-guest-url" class="btn btn-secondary btn-sm">招待URLコピー</button>
+            <button type="button" id="btn-copy-admin-url" class="btn btn-secondary btn-sm">幹事URLコピー</button>
+            <button type="button" id="btn-open-guest-preview" class="btn btn-secondary btn-sm">招待画面を見る</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 回答者一覧（幹事のみ表示） -->
+      <div class="card">
+        <div class="card-head-row">
+          <h2 class="section-title">出欠一覧（幹事限定）</h2>
+          <button type="button" id="btn-admin-refresh" class="btn btn-sm btn-secondary">更新</button>
+        </div>
+        <div id="admin-summary-area"></div>
+        <div id="admin-responses-area"></div>
+      </div>
+
+      <!-- 声かけ済みメモ（幹事専用） -->
+      <div class="card">
+        <h2 class="section-title">声かけ済みメモ（幹事専用）</h2>
+        <p class="muted-text">個別にLINE送信したフレンドを記録して、未返事の相手を把握できます。回答者一覧に同じ名前があると自動で「回答済」表示になります。</p>
+        <form id="invited-memo-form" class="inline-form">
+          <input type="text" id="memo-friend-name" placeholder="フレンド名（例：佐藤）" required />
+          <input type="text" id="memo-friend-note" placeholder="メモ（例：LINE済）" />
+          <button type="submit" class="btn btn-primary btn-sm">追加</button>
+        </form>
+        <div id="invited-memo-list" class="invited-memo-list"></div>
+      </div>
+
+      <!-- イベント設定管理 -->
+      <div class="card">
+        <h2 class="section-title">受付・定員コントロール</h2>
+        <div class="control-row">
+          <div>
+            <strong>手動締切スイッチ</strong>
+            <p class="muted-text">ONにすると招待画面からの新規回答・変更を停止します。</p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="toggle-manual-close" />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="control-form-grid">
+          <div class="form-group">
+            <label for="admin-edit-capacity">定員（名）</label>
+            <input type="number" id="admin-edit-capacity" min="1" max="99" />
+          </div>
+          <div class="form-group">
+            <label for="admin-edit-location">場所</label>
+            <input type="text" id="admin-edit-location" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="admin-edit-auto-close" />
+            <span>定員到達時に自動で「満員（キャンセル待ち）」締切にする</span>
+          </label>
+        </div>
+        <div class="form-group">
+          <label for="admin-edit-note">詳細メモ</label>
+          <textarea id="admin-edit-note" rows="2"></textarea>
+        </div>
+        <div class="actions-row space-between">
+          <button type="button" id="btn-admin-save-settings" class="btn btn-primary">設定を保存</button>
+          <button type="button" id="btn-admin-delete-event" class="btn btn-danger-outline btn-sm">このイベントを削除</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ローディング＆トースト -->
+  <div id="loading-overlay" class="loading-overlay hidden">
+    <div class="spinner"></div>
+    <p id="loading-text">通信中...</p>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="engine.js"></script>
+</body>
+</html>
