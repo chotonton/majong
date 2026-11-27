@@ -1,19 +1,24 @@
 /**
  * 麻雀セット出欠管理システム - フロントエンドエンジン（完全版）
- * LIFF + LINE自動通知 + 複数日連続タップカレンダー + 雀荘名履歴 + 時間プルダウン + 開催確定＆集合案内LINE送信
+ * 幹事＆招待イベント一覧 / フィルタ / 詳細日時編集 / Flex Message送信 / 誤送信防止
  */
 
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbw-yNrj1KqUzx68Ar-NhDo9FgnetpyMoGdO_zAVdiM1yYHr-KJ0pHoqSVfAsVXailO5/exec';
 const LIFF_ID = 'YOUR_LIFF_ID';
 
 const STORAGE_MY_EVENTS = 'mj_set_my_events_v1';
+const STORAGE_INVITED_EVENTS = 'mj_set_invited_events_v1';
 const STORAGE_GUEST_NAME = 'mj_set_guest_name_v1';
 const STORAGE_MY_RESPONSES = 'mj_set_my_responses_v1';
 const STORAGE_LOCATIONS = 'mj_set_locations_v1';
+const STORAGE_FRIENDS = 'mj_set_friends_v1';
 
 const state = {
   createMode: 'single',
   lastCreated: [],
+  dashboardEvents: [],
+  invitedEvents: [],
+  activeFilter: 'all', // 'all' | 'open' | 'full' | 'closed'
   currentEventId: null,
   currentAdminKey: null,
   forcePreview: false,
@@ -22,7 +27,6 @@ const state = {
   invitedMemo: [],
   liffReady: false,
   lineProfile: null,
-  cloudMyEvents: [],
   confirmCustomEdited: false
 };
 
@@ -49,6 +53,10 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function normalizeName(s) {
+  return String(s || '').replace(/\s+/g, '').toLowerCase();
 }
 
 function isLiffConfigured() {
@@ -149,22 +157,215 @@ async function copyToClipboard(text, successMsg = 'コピーしました') {
   }
 }
 
-async function openLineShare(message) {
+/* =====================================================
+   LINE送信（Flex Messageカード優先 ＋ テキスト自動フォールバック）
+===================================================== */
+function safeFlexStr(str, fallback = '-') {
+  const s = String(str || '').trim();
+  return s || fallback;
+}
+
+function buildFlexInfoRow(label, value) {
+  return {
+    type: 'box',
+    layout: 'baseline',
+    spacing: 'sm',
+    contents: [
+      { type: 'text', text: label, color: '#607068', size: 'sm', flex: 2 },
+      { type: 'text', text: safeFlexStr(value), color: '#1c2420', size: 'sm', weight: 'bold', wrap: true, flex: 5 }
+    ]
+  };
+}
+
+function buildInviteFlexBubble(ev) {
+  const guestUrl = buildGuestUrl(ev.id);
+  const dateText = ev.mode === 'single' && ev.dates?.[0]
+    ? formatDateLabel(ev.dates[0].date, ev.dates[0].time)
+    : (ev.dates || []).map(d => formatDateLabel(d.date, d.time)).join('\n');
+
+  const bodyContents = [
+    { type: 'text', text: safeFlexStr(ev.title, '麻雀セット'), weight: 'bold', size: 'lg', wrap: true, color: '#1c2420' },
+    { type: 'separator', margin: 'md' },
+    {
+      type: 'box',
+      layout: 'vertical',
+      margin: 'md',
+      spacing: 'sm',
+      contents: [
+        buildFlexInfoRow('日時', dateText),
+        buildFlexInfoRow('場所', ev.location || '未定'),
+        buildFlexInfoRow('定員', `${ev.capacity}名`)
+      ]
+    }
+  ];
+
+  if (ev.note) {
+    bodyContents.push({
+      type: 'text',
+      text: safeFlexStr(ev.note),
+      size: 'xs',
+      color: '#5d6d65',
+      wrap: true,
+      margin: 'md'
+    });
+  }
+
+  return {
+    type: 'bubble',
+    header: {
+      type: 'box',
+      layout: 'vertical',
+      backgroundColor: '#14532d',
+      paddingAll: '12px',
+      contents: [
+        { type: 'text', text: '麻雀セットのお誘い', color: '#ffffff', weight: 'bold', size: 'sm' }
+      ]
+    },
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      contents: bodyContents
+    },
+    footer: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'sm',
+      contents: [
+        {
+          type: 'button',
+          style: 'primary',
+          color: '#06c755',
+          action: {
+            type: 'uri',
+            label: '出欠を回答する',
+            uri: guestUrl
+          }
+        }
+      ]
+    }
+  };
+}
+
+function buildInviteFlexMessage(ev) {
+  const url = buildGuestUrl(ev.id);
+  if (!/^https:\/\//.test(url)) return null;
+  return {
+    type: 'flex',
+    altText: `【麻雀セットのお誘い】${safeFlexStr(ev.title)}`.slice(0, 390),
+    contents: buildInviteFlexBubble(ev)
+  };
+}
+
+function buildBatchInviteFlexMessage(eventsList) {
+  if (!eventsList || eventsList.length === 0 || eventsList.length > 10) return null;
+  if (!/^https:\/\//.test(buildGuestUrl(eventsList[0].id))) return null;
+  return {
+    type: 'flex',
+    altText: `【麻雀セット日程のお誘い】全${eventsList.length}日程`,
+    contents: {
+      type: 'carousel',
+      contents: eventsList.map(ev => buildInviteFlexBubble(ev))
+    }
+  };
+}
+
+function buildConfirmFlexMessage(info) {
+  const { ev, targetDate, okMembers, maybeMembers, includeMaybe, includeMemo, extraNote } = info;
+  const formatM = (r) => includeMemo && r.condition_memo ? `・${r.name}（${r.condition_memo}）` : `・${r.name}`;
+  const memberText = okMembers.length > 0 ? okMembers.map(formatM).join('\n') : '・（まだ◯回答なし）';
+
+  const bodyContents = [
+    { type: 'text', text: safeFlexStr(ev.title, '麻雀セット'), weight: 'bold', size: 'lg', wrap: true, color: '#1c2420' },
+    { type: 'separator', margin: 'md' },
+    {
+      type: 'box',
+      layout: 'vertical',
+      margin: 'md',
+      spacing: 'sm',
+      contents: [
+        buildFlexInfoRow('日時', formatDateLabel(targetDate.date, targetDate.time)),
+        buildFlexInfoRow('場所', ev.location || '未定（別途連絡）'),
+        buildFlexInfoRow(`参加(${okMembers.length}名)`, memberText)
+      ]
+    }
+  ];
+
+  if (includeMaybe && maybeMembers.length > 0) {
+    bodyContents[2].contents.push(buildFlexInfoRow(`保留(${maybeMembers.length}名)`, maybeMembers.map(formatM).join('\n')));
+  }
+  if (extraNote) {
+    bodyContents[2].contents.push(buildFlexInfoRow('メモ', extraNote));
+  }
+  if (ev.note) {
+    bodyContents.push({ type: 'text', text: safeFlexStr(ev.note), size: 'xs', color: '#5d6d65', wrap: true, margin: 'md' });
+  }
+  bodyContents.push({ type: 'text', text: '当日はよろしくお願いします！', size: 'sm', weight: 'bold', color: '#14532d', margin: 'md' });
+
+  const guestUrl = buildGuestUrl(ev.id);
+  const bubble = {
+    type: 'bubble',
+    header: {
+      type: 'box',
+      layout: 'vertical',
+      backgroundColor: '#06c755',
+      paddingAll: '12px',
+      contents: [
+        { type: 'text', text: '開催確定＆集合案内', color: '#ffffff', weight: 'bold', size: 'sm' }
+      ]
+    },
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      contents: bodyContents
+    }
+  };
+
+  if (/^https:\/\//.test(guestUrl)) {
+    bubble.footer = {
+      type: 'box',
+      layout: 'vertical',
+      contents: [
+        {
+          type: 'button',
+          style: 'secondary',
+          action: { type: 'uri', label: 'イベント詳細を見る', uri: guestUrl }
+        }
+      ]
+    };
+  }
+
+  return {
+    type: 'flex',
+    altText: `【開催確定＆集合案内】${safeFlexStr(ev.title)} ${formatDateLabel(targetDate.date, targetDate.time)}`.slice(0, 390),
+    contents: bubble
+  };
+}
+
+async function openLineShare(fallbackText, flexMessage = null) {
   if (
     state.liffReady &&
     typeof liff !== 'undefined' &&
     liff.isApiAvailable &&
     liff.isApiAvailable('shareTargetPicker')
   ) {
+    if (flexMessage) {
+      try {
+        const res = await liff.shareTargetPicker([flexMessage]);
+        if (res) showToast('LINEでカード送信しました！');
+        return;
+      } catch (e) {
+        console.warn('Flex送信失敗、テキスト送信へ切替:', e);
+      }
+    }
     try {
-      const res = await liff.shareTargetPicker([{ type: 'text', text: message }]);
-      if (res) showToast('LINEでフレンドに送信しました！');
+      const res = await liff.shareTargetPicker([{ type: 'text', text: fallbackText }]);
+      if (res) showToast('LINEで送信しました！');
       return;
     } catch (e) {
       console.warn('ShareTargetPicker失敗、URL共有へ切替:', e);
     }
   }
-  const url = `https://line.me/R/share?text=${encodeURIComponent(message)}`;
+  const url = `https://line.me/R/share?text=${encodeURIComponent(fallbackText)}`;
   window.open(url, '_blank', 'noopener');
 }
 
@@ -187,116 +388,102 @@ function buildLineMessage(ev) {
 }
 
 /* =====================================================
-   開催確定＆集合案内メッセージ生成
+   イベント状態判定（フィルタ用：募集中 / 満員 / 締切）
 ===================================================== */
-function setupConfirmSection(ev, counts) {
-  const dateWrap = $('confirm-date-wrap');
-  const dateSelect = $('confirm-date-select');
-
-  if (ev.mode === 'multi' && ev.dates.length > 1) {
-    dateWrap.classList.remove('hidden');
-
-    // ◯参加人数が最も多い日程を初期選択
-    let bestId = ev.dates[0].id;
-    let bestOk = -1;
-    ev.dates.forEach(d => {
-      const okCnt = counts[d.id]?.ok || 0;
-      if (okCnt > bestOk) {
-        bestOk = okCnt;
-        bestId = d.id;
-      }
-    });
-
-    dateSelect.innerHTML = ev.dates.map(d => {
-      const c = counts[d.id] || { ok: 0, maybe: 0 };
-      const label = `${formatDateLabel(d.date, d.time)}（◯${c.ok}名 / △${c.maybe}名）`;
-      return `<option value="${escapeHtml(d.id)}" ${d.id === bestId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
-    }).join('');
-  } else {
-    dateWrap.classList.add('hidden');
-    dateSelect.innerHTML = '';
+function isEventFull(ev) {
+  if (!ev.dates || ev.dates.length === 0) return false;
+  if (ev.mode === 'single') {
+    return (ev.counts?.[ev.dates[0].id]?.ok || 0) >= ev.capacity;
   }
-
-  state.confirmCustomEdited = false;
-  refreshConfirmMessageText();
+  return ev.dates.some(d => (ev.counts?.[d.id]?.ok || 0) >= ev.capacity);
 }
 
-function generateConfirmMessage() {
-  if (!state.eventData) return '';
-  const { event: ev, responses = [] } = state.eventData;
-
-  let targetDate = ev.dates[0];
-  if (ev.mode === 'multi' && ev.dates.length > 1) {
-    const selectedId = $('confirm-date-select').value;
-    targetDate = ev.dates.find(d => d.id === selectedId) || ev.dates[0];
+function isEventOpen(ev) {
+  if (ev.is_closed) return false;
+  if (!ev.dates || ev.dates.length === 0) return true;
+  if (ev.mode === 'single') {
+    return (ev.counts?.[ev.dates[0].id]?.ok || 0) < ev.capacity;
   }
-
-  const includeMaybe = $('confirm-opt-include-maybe').checked;
-  const includeMemo = $('confirm-opt-include-memo').checked;
-  const extraNote = $('confirm-extra-note').value.trim();
-
-  const dId = targetDate.id;
-  const okMembers = responses.filter(r => r.answers[dId] === 'ok');
-  const maybeMembers = responses.filter(r => r.answers[dId] === 'maybe');
-
-  const formatMember = (r) =>
-    includeMemo && r.condition_memo ? `・${r.name}（${r.condition_memo}）` : `・${r.name}`;
-
-  const lines = [
-    '【開催確定＆集合案内】',
-    ev.title,
-    '',
-    `■ 日時：${formatDateLabel(targetDate.date, targetDate.time)}`,
-    `■ 場所：${ev.location || '未定（別途連絡）'}`,
-    `■ 参加メンバー（${okMembers.length}名）`
-  ];
-
-  if (okMembers.length > 0) {
-    lines.push(...okMembers.map(formatMember));
-  } else {
-    lines.push('・（まだ◯回答がありません）');
-  }
-
-  if (includeMaybe && maybeMembers.length > 0) {
-    lines.push('', `■ 保留・調整中（${maybeMembers.length}名）`, ...maybeMembers.map(formatMember));
-  }
-
-  if (extraNote) {
-    lines.push('', `■ 集合・予約メモ：${extraNote}`);
-  }
-
-  if (ev.note) {
-    lines.push('', `■ イベント詳細：`, ev.note);
-  }
-
-  lines.push('', '当日はよろしくお願いします！');
-  return lines.join('\n');
+  return ev.dates.some(d => (ev.counts?.[d.id]?.ok || 0) < ev.capacity);
 }
 
-function refreshConfirmMessageText(force = false) {
-  if (!force && state.confirmCustomEdited) return;
-  const ta = $('confirm-message-text');
-  if (ta) ta.value = generateConfirmMessage();
-}
-
-function getCurrentConfirmMessage() {
-  const ta = $('confirm-message-text');
-  if (state.confirmCustomEdited && ta && ta.value.trim()) {
-    return ta.value;
-  }
-  return generateConfirmMessage();
+function matchesFilter(ev, filter) {
+  if (filter === 'all') return true;
+  if (filter === 'closed') return Boolean(ev.is_closed);
+  if (filter === 'full') return !ev.is_closed && isEventFull(ev);
+  if (filter === 'open') return isEventOpen(ev);
+  return true;
 }
 
 /* =====================================================
-   雀荘名（場所）履歴チップ機能
+   フレンド履歴・雀荘名履歴
 ===================================================== */
+function loadFriendHistory() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(STORAGE_FRIENDS) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function saveFriendToHistory(name) {
+  const cleaned = String(name || '').trim();
+  if (!cleaned) return;
+  const list = loadFriendHistory().filter(item => item !== cleaned);
+  list.unshift(cleaned);
+  localStorage.setItem(STORAGE_FRIENDS, JSON.stringify(list.slice(0, 20)));
+}
+
+function removeFriendFromHistory(name) {
+  localStorage.setItem(STORAGE_FRIENDS, JSON.stringify(loadFriendHistory().filter(item => item !== name)));
+  renderFriendHistoryChips();
+}
+
+function renderFriendHistoryChips() {
+  const wrap = $('friend-history-chips');
+  if (!wrap) return;
+  const list = loadFriendHistory();
+  if (list.length === 0) {
+    wrap.classList.add('hidden');
+    wrap.innerHTML = '';
+    return;
+  }
+
+  const sentSet = new Set(state.invitedMemo.map(m => normalizeName(m.name)));
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = '';
+
+  list.forEach(name => {
+    const isSent = sentSet.has(normalizeName(name));
+    const chip = document.createElement('span');
+    chip.className = `loc-chip ${isSent ? 'already-sent-chip' : ''}`;
+    chip.innerHTML = `
+      <button type="button" class="loc-chip-text">${escapeHtml(name)}${isSent ? ' (済)' : ''}</button>
+      <button type="button" class="loc-chip-del" aria-label="履歴削除">×</button>
+    `;
+    chip.querySelector('.loc-chip-text').addEventListener('click', () => {
+      const inp = $('invite-target-names');
+      const current = inp.value.trim();
+      const existing = splitTargetNames(current);
+      if (existing.some(n => normalizeName(n) === normalizeName(name))) {
+        showToast(`「${name}」は入力欄に入っています`);
+        return;
+      }
+      inp.value = current ? `${current}、${name}` : name;
+    });
+    chip.querySelector('.loc-chip-del').addEventListener('click', () => removeFriendFromHistory(name));
+    wrap.appendChild(chip);
+  });
+}
+
+function splitTargetNames(rawStr) {
+  return String(rawStr || '').split(/[、,，\n]+/).map(s => s.trim()).filter(Boolean);
+}
+
 function loadLocationHistory() {
   try {
     const arr = JSON.parse(localStorage.getItem(STORAGE_LOCATIONS) || '[]');
     return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
 function saveLocationToHistory(loc) {
@@ -309,8 +496,7 @@ function saveLocationToHistory(loc) {
 }
 
 function removeLocationFromHistory(loc) {
-  const list = loadLocationHistory().filter(item => item !== loc);
-  localStorage.setItem(STORAGE_LOCATIONS, JSON.stringify(list));
+  localStorage.setItem(STORAGE_LOCATIONS, JSON.stringify(loadLocationHistory().filter(item => item !== loc)));
   renderLocationHistoryChips();
 }
 
@@ -318,7 +504,6 @@ function renderLocationHistoryChips() {
   const wrap = $('location-history-chips');
   if (!wrap) return;
   const list = loadLocationHistory();
-
   if (list.length === 0) {
     wrap.classList.add('hidden');
     wrap.innerHTML = '';
@@ -338,11 +523,96 @@ function renderLocationHistoryChips() {
       $('ev-location').value = loc;
       showToast(`場所を「${loc}」に設定しました`);
     });
-    chip.querySelector('.loc-chip-del').addEventListener('click', () => {
-      removeLocationFromHistory(loc);
-    });
+    chip.querySelector('.loc-chip-del').addEventListener('click', () => removeLocationFromHistory(loc));
     wrap.appendChild(chip);
   });
+}
+
+/* =====================================================
+   開催確定＆集合案内
+===================================================== */
+function setupConfirmSection(ev, counts) {
+  const dateWrap = $('confirm-date-wrap');
+  const dateSelect = $('confirm-date-select');
+
+  if (ev.mode === 'multi' && ev.dates.length > 1) {
+    dateWrap.classList.remove('hidden');
+    let bestId = ev.dates[0].id;
+    let bestOk = -1;
+    ev.dates.forEach(d => {
+      const okCnt = counts[d.id]?.ok || 0;
+      if (okCnt > bestOk) { bestOk = okCnt; bestId = d.id; }
+    });
+    dateSelect.innerHTML = ev.dates.map(d => {
+      const c = counts[d.id] || { ok: 0, maybe: 0 };
+      const label = `${formatDateLabel(d.date, d.time)}（◯${c.ok}名 / △${c.maybe}名）`;
+      return `<option value="${escapeHtml(d.id)}" ${d.id === bestId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    }).join('');
+  } else {
+    dateWrap.classList.add('hidden');
+    dateSelect.innerHTML = '';
+  }
+
+  state.confirmCustomEdited = false;
+  refreshConfirmMessageText();
+}
+
+function getConfirmContext() {
+  if (!state.eventData) return null;
+  const { event: ev, responses = [] } = state.eventData;
+  let targetDate = ev.dates[0];
+  if (ev.mode === 'multi' && ev.dates.length > 1) {
+    const selectedId = $('confirm-date-select').value;
+    targetDate = ev.dates.find(d => d.id === selectedId) || ev.dates[0];
+  }
+  const dId = targetDate.id;
+  return {
+    ev,
+    targetDate,
+    okMembers: responses.filter(r => r.answers[dId] === 'ok'),
+    maybeMembers: responses.filter(r => r.answers[dId] === 'maybe'),
+    includeMaybe: $('confirm-opt-include-maybe').checked,
+    includeMemo: $('confirm-opt-include-memo').checked,
+    extraNote: $('confirm-extra-note').value.trim()
+  };
+}
+
+function generateConfirmMessage() {
+  const ctx = getConfirmContext();
+  if (!ctx) return '';
+  const { ev, targetDate, okMembers, maybeMembers, includeMaybe, includeMemo, extraNote } = ctx;
+  const formatMember = (r) =>
+    includeMemo && r.condition_memo ? `・${r.name}（${r.condition_memo}）` : `・${r.name}`;
+
+  const lines = [
+    '【開催確定＆集合案内】',
+    ev.title,
+    '',
+    `■ 日時：${formatDateLabel(targetDate.date, targetDate.time)}`,
+    `■ 場所：${ev.location || '未定（別途連絡）'}`,
+    `■ 参加メンバー（${okMembers.length}名）`,
+    ...(okMembers.length > 0 ? okMembers.map(formatMember) : ['・（まだ◯回答がありません）'])
+  ];
+
+  if (includeMaybe && maybeMembers.length > 0) {
+    lines.push('', `■ 保留・調整中（${maybeMembers.length}名）`, ...maybeMembers.map(formatMember));
+  }
+  if (extraNote) lines.push('', `■ 集合・予約メモ：${extraNote}`);
+  if (ev.note) lines.push('', '■ イベント詳細：', ev.note);
+  lines.push('', '当日はよろしくお願いします！');
+  return lines.join('\n');
+}
+
+function refreshConfirmMessageText(force = false) {
+  if (!force && state.confirmCustomEdited) return;
+  const ta = $('confirm-message-text');
+  if (ta) ta.value = generateConfirmMessage();
+}
+
+function getCurrentConfirmMessage() {
+  const ta = $('confirm-message-text');
+  if (state.confirmCustomEdited && ta && ta.value.trim()) return ta.value;
+  return generateConfirmMessage();
 }
 
 /* =====================================================
@@ -449,14 +719,26 @@ function renderCalendarGrid() {
         updateMultiConfirmButton();
       });
     }
-
     grid.appendChild(btn);
   }
 }
 
 /* =====================================================
-   時間プルダウン生成（1時間＋15分刻み）
+   時間プルダウン（1時間＋15分刻み）
 ===================================================== */
+function parseTimeString(timeStr, defaultEndH = '') {
+  const m = /^(\d{1,2}):(\d{2})\s*[〜~\-]\s*(?:(\d{1,2}):(\d{2}))?/.exec(String(timeStr || '').trim());
+  if (!m) return { sh: '13', sm: '00', eh: defaultEndH, em: '00' };
+  const pad = (v) => String(v).padStart(2, '0');
+  const clampMin = (v) => (['00', '15', '30', '45'].includes(v) ? v : '00');
+  return {
+    sh: pad(m[1]),
+    sm: clampMin(m[2]),
+    eh: m[3] ? pad(m[3]) : '',
+    em: m[4] ? clampMin(m[4]) : '00'
+  };
+}
+
 function buildHourOptions(selectedHour, includeNone = false) {
   let html = '';
   if (includeNone) {
@@ -497,9 +779,7 @@ function buildTimeSelectHtml(sh = '13', sm = '00', eh = '19', em = '00') {
 function bindTimeSelectEvents(rowEl) {
   const endH = rowEl.querySelector('.sel-end-h');
   const endM = rowEl.querySelector('.sel-end-m');
-  endH.addEventListener('change', () => {
-    endM.disabled = endH.value === '';
-  });
+  endH.addEventListener('change', () => { endM.disabled = endH.value === ''; });
 }
 
 function getLastRowTime(container, defaultEndH = '19') {
@@ -523,14 +803,10 @@ function readTimeFromRow(rowEl) {
 }
 
 /* =====================================================
-   ローカルストレージ操作
+   ローカルストレージ操作（幹事履歴 ＆ 招待履歴）
 ===================================================== */
 function loadLocalMyEvents() {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_MY_EVENTS) || '[]');
-  } catch {
-    return [];
-  }
+  try { return JSON.parse(localStorage.getItem(STORAGE_MY_EVENTS) || '[]'); } catch { return []; }
 }
 
 function saveLocalMyEvents(list) {
@@ -554,26 +830,46 @@ function addMyEventHistory(item) {
 
 function removeMyEventHistory(eventId) {
   saveLocalMyEvents(loadLocalMyEvents().filter(e => e.id !== eventId));
-  state.cloudMyEvents = state.cloudMyEvents.filter(e => e.id !== eventId);
+  state.dashboardEvents = state.dashboardEvents.filter(e => e.id !== eventId);
+}
+
+function loadInvitedEventIds() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(STORAGE_INVITED_EVENTS) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function saveInvitedEventIds(ids) {
+  localStorage.setItem(STORAGE_INVITED_EVENTS, JSON.stringify(ids.slice(0, 50)));
+}
+
+function addInvitedEventHistory(eventId) {
+  if (!eventId) return;
+  const list = loadInvitedEventIds().filter(id => id !== eventId);
+  list.unshift(eventId);
+  saveInvitedEventIds(list);
+}
+
+function removeInvitedEventHistory(eventId) {
+  saveInvitedEventIds(loadInvitedEventIds().filter(id => id !== eventId));
+  state.invitedEvents = state.invitedEvents.filter(e => e.id !== eventId);
+}
+
+function loadMyResponseMap() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_MY_RESPONSES) || '{}'); } catch { return {}; }
 }
 
 function getMyResponseId(eventId) {
-  try {
-    const map = JSON.parse(localStorage.getItem(STORAGE_MY_RESPONSES) || '{}');
-    return map[eventId] || '';
-  } catch {
-    return '';
-  }
+  return loadMyResponseMap()[eventId] || '';
 }
 
 function setMyResponseId(eventId, responseId) {
   try {
-    const map = JSON.parse(localStorage.getItem(STORAGE_MY_RESPONSES) || '{}');
+    const map = loadMyResponseMap();
     map[eventId] = responseId;
     localStorage.setItem(STORAGE_MY_RESPONSES, JSON.stringify(map));
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 /* =====================================================
@@ -601,17 +897,12 @@ async function apiPost(payload) {
 ===================================================== */
 async function initLiffIfAvailable() {
   if (!isLiffConfigured() || typeof liff === 'undefined') return;
-
   try {
     await liff.init({ liffId: LIFF_ID });
     state.liffReady = true;
-
     if (liff.isLoggedIn()) {
       const profile = await liff.getProfile();
-      state.lineProfile = {
-        userId: profile.userId,
-        displayName: profile.displayName
-      };
+      state.lineProfile = { userId: profile.userId, displayName: profile.displayName };
     }
   } catch (e) {
     console.warn('LIFF初期化スキップ（通常ブラウザ動作）:', e);
@@ -635,7 +926,7 @@ function updateLineStatusBar() {
     textEl.textContent = `LINE連携中：${state.lineProfile.displayName} さん（イベント同期・自動通知ON）`;
     loginBtn.classList.add('hidden');
   } else {
-    textEl.textContent = 'LINEログインすると作成イベントの自動同期・回答通知が使えます';
+    textEl.textContent = 'LINEログインすると作成・招待イベントの自動同期が使えます';
     loginBtn.classList.remove('hidden');
   }
 }
@@ -645,6 +936,7 @@ function parseUrlParams() {
   let id = params.get('id') || '';
   let key = params.get('key') || '';
   let preview = params.get('preview') === '1';
+  let view = params.get('view') || '';
 
   if (!id && params.get('liff.state')) {
     const rawState = params.get('liff.state');
@@ -654,65 +946,95 @@ function parseUrlParams() {
       id = sub.get('id') || '';
       key = sub.get('key') || key;
       preview = preview || sub.get('preview') === '1';
+      view = sub.get('view') || view;
     }
   }
-  return { id, key, preview };
+  return { id, key, preview, view };
 }
 
 /* =====================================================
    画面切替・初期化
 ===================================================== */
 function hideAllViews() {
+  $('view-home').classList.add('hidden');
   $('view-create').classList.add('hidden');
   $('view-guest').classList.add('hidden');
   $('view-admin').classList.add('hidden');
   $('view-error').classList.add('hidden');
 }
 
+function setHeaderButtons(mode) {
+  $('btn-go-home').classList.toggle('hidden', mode === 'home');
+  $('btn-go-create').classList.toggle('hidden', mode === 'create');
+}
+
 function showErrorView(msg) {
   hideAllViews();
+  setHeaderButtons('error');
   $('error-message').textContent = msg;
   $('view-error').classList.remove('hidden');
 }
 
 async function init() {
   bindStaticEvents();
-
   showLoading('読み込み中...');
   await initLiffIfAvailable();
   hideLoading();
 
-  const { id, key, preview } = parseUrlParams();
-  if (!id) {
-    await initCreateView();
-  } else {
+  const { id, key, preview, view } = parseUrlParams();
+  if (id) {
     state.currentEventId = id;
     state.currentAdminKey = key;
     state.forcePreview = preview;
     await loadEventAndRender();
+  } else if (view === 'create') {
+    openCreateView(false);
+  } else {
+    await openHomeView(false);
   }
 }
 
 function bindStaticEvents() {
+  $('btn-go-home').addEventListener('click', () => { window.location.href = getBaseUrl(); });
   $('btn-go-create').addEventListener('click', () => {
-    window.location.href = getBaseUrl();
+    if (state.currentEventId) {
+      window.location.href = `${getBaseUrl()}?view=create`;
+    } else {
+      openCreateView(true);
+    }
   });
 
-  // カレンダーモーダル操作
+  // ホーム画面
+  $('btn-home-refresh').addEventListener('click', () => loadDashboard());
+  $('btn-home-create').addEventListener('click', () => openCreateView(true));
+  $('btn-empty-create').addEventListener('click', () => openCreateView(true));
+
+  // フィルタ切替
+  document.querySelectorAll('#dashboard-filter-bar .filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.activeFilter = btn.dataset.filter;
+      document.querySelectorAll('#dashboard-filter-bar .filter-btn').forEach(b => {
+        b.classList.toggle('active', b === btn);
+      });
+      renderDashboardAll();
+    });
+  });
+
+  // 戻るボタン
+  $('btn-create-back-home').addEventListener('click', () => openHomeView(true));
+  $('btn-result-go-home').addEventListener('click', () => openHomeView(true));
+  $('btn-admin-back-home').addEventListener('click', () => { window.location.href = getBaseUrl(); });
+  $('btn-guest-go-home').addEventListener('click', () => { window.location.href = getBaseUrl(); });
+
+  // カレンダーモーダル
   $('cal-prev').addEventListener('click', () => {
     calState.viewMonth--;
-    if (calState.viewMonth < 0) {
-      calState.viewMonth = 11;
-      calState.viewYear--;
-    }
+    if (calState.viewMonth < 0) { calState.viewMonth = 11; calState.viewYear--; }
     renderCalendarGrid();
   });
   $('cal-next').addEventListener('click', () => {
     calState.viewMonth++;
-    if (calState.viewMonth > 11) {
-      calState.viewMonth = 0;
-      calState.viewYear++;
-    }
+    if (calState.viewMonth > 11) { calState.viewMonth = 0; calState.viewYear++; }
     renderCalendarGrid();
   });
   $('cal-today').addEventListener('click', () => {
@@ -723,8 +1045,7 @@ function bindStaticEvents() {
   });
   $('cal-confirm-multi').addEventListener('click', () => {
     if (typeof calState.onConfirmMulti === 'function') {
-      const sorted = Array.from(calState.selectedSet).sort();
-      calState.onConfirmMulti(sorted);
+      calState.onConfirmMulti(Array.from(calState.selectedSet).sort());
     }
     closeCalendarModal();
   });
@@ -742,6 +1063,7 @@ function bindStaticEvents() {
     });
   }
 
+  // 新規作成フォーム
   document.querySelectorAll('.mode-tab').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.mode-tab').forEach(b => b.classList.remove('active'));
@@ -753,9 +1075,7 @@ function bindStaticEvents() {
   });
 
   document.querySelectorAll('.cap-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      $('ev-capacity').value = chip.dataset.cap;
-    });
+    chip.addEventListener('click', () => { $('ev-capacity').value = chip.dataset.cap; });
   });
 
   $('btn-add-single-row').addEventListener('click', () => {
@@ -773,31 +1093,43 @@ function bindStaticEvents() {
   $('create-form').addEventListener('submit', handleCreateSubmit);
   $('btn-batch-line-share').addEventListener('click', handleBatchLineShare);
 
-  $('btn-clear-history').addEventListener('click', () => {
-    if (!confirm('この端末の表示履歴のみをクリアしますか？（イベント本体を消す場合は各カードの「完全削除」を使ってください）')) return;
-    localStorage.removeItem(STORAGE_MY_EVENTS);
-    renderMyEventsHistory();
-  });
-
+  // ゲスト画面
   $('btn-guest-refresh').addEventListener('click', () => loadEventAndRender());
   $('guest-form').addEventListener('submit', handleGuestSubmit);
 
+  // 幹事詳細画面
   $('btn-admin-refresh').addEventListener('click', () => loadEventAndRender());
-  $('btn-admin-line-share').addEventListener('click', () => {
-    if (!state.eventData) return;
-    openLineShare(buildLineMessage(state.eventData.event));
+  $('btn-admin-line-share').addEventListener('click', handleAdminInviteSend);
+  $('btn-invite-record-only').addEventListener('click', handleInviteRecordOnly);
+
+  $('btn-copy-guest-url').addEventListener('click', () => copyToClipboard(buildGuestUrl(state.currentEventId), '招待用URLをコピーしました'));
+  $('btn-copy-admin-url').addEventListener('click', () => copyToClipboard(buildAdminUrl(state.currentEventId, state.currentAdminKey), '幹事用URLをコピーしました'));
+  $('btn-open-guest-preview').addEventListener('click', () => window.open(buildPreviewUrl(state.currentEventId), '_blank', 'noopener'));
+
+  // 詳細画面の日時編集（複数候補日モード時の追加ボタン）
+  $('btn-admin-add-date').addEventListener('click', () => {
+    const container = $('admin-edit-dates-rows');
+    const t = getLastRowTime(container, '');
+    addAdminEditDateRow({ id: '', date: getTodayStr(container.children.length + 1), time: '' }, true, t);
   });
-  $('btn-copy-guest-url').addEventListener('click', () => {
-    copyToClipboard(buildGuestUrl(state.currentEventId), '招待用URLをコピーしました');
-  });
-  $('btn-copy-admin-url').addEventListener('click', () => {
-    copyToClipboard(buildAdminUrl(state.currentEventId, state.currentAdminKey), '幹事用URLをコピーしました');
-  });
-  $('btn-open-guest-preview').addEventListener('click', () => {
-    window.open(buildPreviewUrl(state.currentEventId), '_blank', 'noopener');
+  $('btn-admin-multi-pick').addEventListener('click', () => {
+    const container = $('admin-edit-dates-rows');
+    const existingDates = Array.from(container.querySelectorAll('.inp-date')).map(el => el.value);
+    const existingSet = new Set(existingDates);
+    const t = getLastRowTime(container, '');
+    openCalendarMulti(existingDates, (pickedDates) => {
+      let added = 0;
+      pickedDates.forEach(dateStr => {
+        if (existingSet.has(dateStr)) return;
+        addAdminEditDateRow({ id: '', date: dateStr, time: '' }, true, t);
+        existingSet.add(dateStr);
+        added++;
+      });
+      showToast(added > 0 ? `${added}日分の候補を追加しました` : '選択した日付は既に追加済みです');
+    });
   });
 
-  // 開催確定＆集合案内イベント
+  // 開催確定＆集合案内
   const onConfirmOptionChange = () => {
     state.confirmCustomEdited = false;
     refreshConfirmMessageText(true);
@@ -807,9 +1139,7 @@ function bindStaticEvents() {
   $('confirm-opt-include-memo').addEventListener('change', onConfirmOptionChange);
   $('confirm-extra-note').addEventListener('input', onConfirmOptionChange);
 
-  $('confirm-message-text').addEventListener('input', () => {
-    state.confirmCustomEdited = true;
-  });
+  $('confirm-message-text').addEventListener('input', () => { state.confirmCustomEdited = true; });
 
   $('btn-confirm-preview-toggle').addEventListener('click', () => {
     const wrap = $('confirm-preview-wrap');
@@ -821,27 +1151,381 @@ function bindStaticEvents() {
   $('btn-confirm-reset').addEventListener('click', () => {
     state.confirmCustomEdited = false;
     refreshConfirmMessageText(true);
-    showToast('自動生成された文面に戻しました');
+    showToast('自動生成（カード送信）に戻しました');
   });
 
   $('btn-confirm-line-share').addEventListener('click', () => {
     const msg = getCurrentConfirmMessage();
     if (!msg) return;
-    openLineShare(msg);
+    const flexMsg = !state.confirmCustomEdited ? buildConfirmFlexMessage(getConfirmContext()) : null;
+    openLineShare(msg, flexMsg);
   });
 
   $('btn-confirm-copy').addEventListener('click', () => {
     const msg = getCurrentConfirmMessage();
-    if (!msg) return;
-    copyToClipboard(msg, '確定案内文をコピーしました');
+    if (msg) copyToClipboard(msg, '確定案内文をコピーしました');
   });
 
-  $('invited-memo-form').addEventListener('submit', handleAddInvitedMemo);
   $('toggle-manual-close').addEventListener('change', handleManualCloseToggle);
   $('btn-admin-save-settings').addEventListener('click', handleAdminSaveSettings);
   $('btn-admin-delete-event').addEventListener('click', () => {
     handleDeleteEventByIds(state.currentEventId, state.currentAdminKey, state.eventData?.event?.title || '', true);
   });
+}
+
+/* =====================================================
+   ビュー0：トップ画面（幹事イベント ＋ 招待イベント一覧）
+===================================================== */
+async function openHomeView(updateHistory = false) {
+  state.currentEventId = null;
+  state.currentAdminKey = null;
+  if (updateHistory) window.history.replaceState({}, '', getBaseUrl());
+  hideAllViews();
+  setHeaderButtons('home');
+  $('view-home').classList.remove('hidden');
+  await loadDashboard();
+}
+
+async function loadDashboard() {
+  const localEvents = loadLocalMyEvents();
+  const localItems = localEvents.map(e => ({ id: e.id, admin_key: e.admin_key }));
+  const invitedIds = loadInvitedEventIds();
+  const myResponseMap = loadMyResponseMap();
+
+  if (!state.lineProfile && localItems.length === 0 && invitedIds.length === 0 && Object.keys(myResponseMap).length === 0) {
+    state.dashboardEvents = [];
+    state.invitedEvents = [];
+    renderDashboardAll();
+    return;
+  }
+
+  showLoading('イベント一覧を取得中...');
+  try {
+    const res = await apiPost({
+      action: 'list_admin_dashboard',
+      line_uid: state.lineProfile?.userId || '',
+      local_items: localItems,
+      invited_ids: invitedIds,
+      my_response_map: myResponseMap
+    });
+    if (!res.ok) throw new Error(res.error || '一覧の取得に失敗しました');
+
+    if (Array.isArray(res.missing_ids) && res.missing_ids.length > 0) {
+      const missingSet = new Set(res.missing_ids);
+      saveLocalMyEvents(localEvents.filter(e => !missingSet.has(e.id)));
+    }
+    if (Array.isArray(res.missing_invited_ids) && res.missing_invited_ids.length > 0) {
+      const missingInvSet = new Set(res.missing_invited_ids);
+      saveInvitedEventIds(invitedIds.filter(id => !missingInvSet.has(id)));
+    }
+
+    state.dashboardEvents = Array.isArray(res.events) ? res.events : [];
+    state.invitedEvents = Array.isArray(res.invited_events) ? res.invited_events : [];
+    renderDashboardAll();
+  } catch (err) {
+    alert('一覧読み込みエラー: ' + err.message);
+  } finally {
+    hideLoading();
+  }
+}
+
+function updateFilterCounts() {
+  const allCombined = [...state.dashboardEvents, ...state.invitedEvents];
+  const counts = {
+    all: allCombined.length,
+    open: allCombined.filter(ev => matchesFilter(ev, 'open')).length,
+    full: allCombined.filter(ev => matchesFilter(ev, 'full')).length,
+    closed: allCombined.filter(ev => matchesFilter(ev, 'closed')).length
+  };
+  const labels = { all: 'すべて', open: '募集中', full: '満員', closed: '締切中' };
+  document.querySelectorAll('#dashboard-filter-bar .filter-btn').forEach(btn => {
+    const f = btn.dataset.filter;
+    btn.textContent = `${labels[f]} (${counts[f]})`;
+  });
+}
+
+function renderDashboardAll() {
+  updateFilterCounts();
+  renderInvitedDashboardList();
+  renderAdminDashboardList();
+}
+
+function getStatusBadgeHtml(ev) {
+  if (ev.is_closed) return '<span class="badge badge-closed">締切中</span>';
+  if (ev.mode === 'single') {
+    return isEventFull(ev)
+      ? '<span class="badge badge-full">満員</span>'
+      : '<span class="badge badge-open">募集中</span>';
+  }
+  return isEventFull(ev)
+    ? '<span class="badge badge-full">満員日程あり</span>'
+    : '<span class="badge badge-open">日程調整中</span>';
+}
+
+function renderInvitedDashboardList() {
+  const card = $('home-invited-card');
+  const badge = $('invited-count-badge');
+  const wrap = $('invited-table-wrap');
+  const filterEmpty = $('invited-filter-empty');
+  const tbody = $('invited-list');
+
+  if (!state.invitedEvents || state.invitedEvents.length === 0) {
+    card.classList.add('hidden');
+    return;
+  }
+
+  card.classList.remove('hidden');
+  const filtered = state.invitedEvents.filter(ev => matchesFilter(ev, state.activeFilter));
+  badge.textContent = `${filtered.length}件`;
+
+  if (filtered.length === 0) {
+    wrap.classList.add('hidden');
+    filterEmpty.classList.remove('hidden');
+    tbody.innerHTML = '';
+    return;
+  }
+
+  wrap.classList.remove('hidden');
+  filterEmpty.classList.add('hidden');
+  tbody.innerHTML = '';
+
+  const markMap = {
+    ok: { text: '◯ 参加', cls: 'ok' },
+    maybe: { text: '△ 保留', cls: 'maybe' },
+    ng: { text: '✕ 不参加', cls: 'ng' }
+  };
+
+  filtered.forEach(ev => {
+    const guestUrl = `${getBaseUrl()}?id=${encodeURIComponent(ev.id)}`;
+    const tr = document.createElement('tr');
+    const dateLine = ev.mode === 'single' && ev.dates[0]
+      ? formatDateLabel(ev.dates[0].date, ev.dates[0].time)
+      : `候補日 ${ev.dates.length}日程`;
+
+    const infoHtml = `
+      <div class="hero-badges" style="margin-bottom:4px;">
+        ${getStatusBadgeHtml(ev)}
+        ${ev.admin_name ? `<span class="badge">幹事：${escapeHtml(ev.admin_name)}</span>` : ''}
+      </div>
+      <div class="dash-ev-title">${escapeHtml(ev.title)}</div>
+      <div class="dash-ev-meta">
+        <span>日時：${escapeHtml(dateLine)}</span>
+        <span>場所：${escapeHtml(ev.location || '未定')}</span>
+      </div>
+    `;
+
+    let countHtml = '';
+    let myAnsHtml = '';
+
+    if (ev.mode === 'single' && ev.dates[0]) {
+      const dId = ev.dates[0].id;
+      const c = ev.counts?.[dId] || { ok: 0, maybe: 0, ng: 0 };
+      const rem = Math.max(0, ev.capacity - c.ok);
+      countHtml = `
+        <div class="dash-count-main">参加 ${c.ok} / ${ev.capacity}名</div>
+        <div class="dash-count-sub">
+          <span>${rem === 0 ? '満員' : '残り' + rem + '枠'}</span>
+          ${c.maybe > 0 ? `<span>保留 ${c.maybe}</span>` : ''}
+        </div>
+      `;
+
+      const ansKey = ev.my_answers?.[dId];
+      const m = markMap[ansKey];
+      myAnsHtml = m
+        ? `<span class="member-chip ${m.cls}">${m.text}</span>`
+        : '<span class="member-chip wait">未回答</span>';
+    } else {
+      countHtml = `
+        <div class="dash-count-main">回答 ${ev.total_respondents}名</div>
+        <div class="dash-count-sub"><span>定員 ${ev.capacity}名</span></div>
+      `;
+      myAnsHtml = ev.dates.map(d => {
+        const c = ev.counts?.[d.id] || { ok: 0, maybe: 0 };
+        const ansKey = ev.my_answers?.[d.id];
+        const m = markMap[ansKey];
+        const chipHtml = m
+          ? `<span class="member-chip ${m.cls}">${m.text}</span>`
+          : '<span class="member-chip wait">未回答</span>';
+        return `
+          <div class="dash-multi-row">
+            <div class="dash-multi-head">
+              <span>${escapeHtml(formatDateLabel(d.date, d.time))}</span>
+              <span>◯${c.ok}/${ev.capacity}名</span>
+            </div>
+            <div>${chipHtml}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    tr.innerHTML = `
+      <td class="col-info">${infoHtml}</td>
+      <td class="col-count">${countHtml}</td>
+      <td class="col-members">${myAnsHtml}</td>
+      <td class="col-action">
+        <div class="dash-action-cell">
+          <a href="${guestUrl}" class="btn btn-primary btn-sm">${ev.my_answers ? '確認・変更' : '回答する'}</a>
+          <button type="button" class="btn btn-secondary btn-sm btn-inv-hide">非表示</button>
+        </div>
+      </td>
+    `;
+
+    tr.querySelector('.btn-inv-hide').addEventListener('click', () => {
+      removeInvitedEventHistory(ev.id);
+      renderDashboardAll();
+      showToast('招待一覧から非表示にしました');
+    });
+
+    tbody.appendChild(tr);
+  });
+}
+
+function renderAdminDashboardList() {
+  const allList = state.dashboardEvents;
+  const badge = $('admin-count-badge');
+  const emptyBox = $('dashboard-empty');
+  const filterEmpty = $('dashboard-filter-empty');
+  const tableWrap = $('dashboard-table-wrap');
+  const tbody = $('dashboard-list');
+
+  if (!allList || allList.length === 0) {
+    badge.textContent = '0件';
+    emptyBox.classList.remove('hidden');
+    filterEmpty.classList.add('hidden');
+    tableWrap.classList.add('hidden');
+    tbody.innerHTML = '';
+    return;
+  }
+
+  emptyBox.classList.add('hidden');
+  const filtered = allList.filter(ev => matchesFilter(ev, state.activeFilter));
+  badge.textContent = `${filtered.length}件`;
+
+  if (filtered.length === 0) {
+    filterEmpty.classList.remove('hidden');
+    tableWrap.classList.add('hidden');
+    tbody.innerHTML = '';
+    return;
+  }
+
+  filterEmpty.classList.add('hidden');
+  tableWrap.classList.remove('hidden');
+  tbody.innerHTML = '';
+
+  filtered.forEach(ev => {
+    const adminUrl = buildAdminUrl(ev.id, ev.admin_key);
+    const tr = document.createElement('tr');
+    const dateLine = ev.mode === 'single' && ev.dates[0]
+      ? formatDateLabel(ev.dates[0].date, ev.dates[0].time)
+      : `候補日 ${ev.dates.length}日程`;
+
+    const infoHtml = `
+      <div class="hero-badges" style="margin-bottom:4px;">
+        ${getStatusBadgeHtml(ev)}
+        ${ev.invited_count > 0 ? `<span class="badge">招待済 ${ev.invited_count}名${ev.invited_unanswered > 0 ? ' (未返事' + ev.invited_unanswered + ')' : ''}</span>` : ''}
+      </div>
+      <div class="dash-ev-title">${escapeHtml(ev.title)}</div>
+      <div class="dash-ev-meta">
+        <span>日時：${escapeHtml(dateLine)}</span>
+        <span>場所：${escapeHtml(ev.location || '未定')}</span>
+      </div>
+    `;
+
+    let countHtml = '';
+    let membersHtml = '';
+
+    if (ev.mode === 'single' && ev.dates[0]) {
+      const dId = ev.dates[0].id;
+      const c = ev.counts?.[dId] || { ok: 0, maybe: 0, ng: 0 };
+      const m = ev.date_members?.[dId] || { ok: [], maybe: [], ng: [] };
+      const rem = Math.max(0, ev.capacity - c.ok);
+
+      countHtml = `
+        <div class="dash-count-main">参加 ${c.ok} / ${ev.capacity}名</div>
+        <div class="dash-count-sub">
+          <span>${rem === 0 ? '満員' : '残り' + rem + '枠'}</span>
+          ${c.maybe > 0 ? `<span>保留 ${c.maybe}</span>` : ''}
+          ${c.ng > 0 ? `<span>不参加 ${c.ng}</span>` : ''}
+        </div>
+      `;
+
+      const chips = [];
+      m.ok.forEach(name => chips.push(`<span class="member-chip ok">◯ ${escapeHtml(name)}</span>`));
+      m.maybe.forEach(name => chips.push(`<span class="member-chip maybe">△ ${escapeHtml(name)}</span>`));
+      membersHtml = chips.length > 0
+        ? `<div class="member-chip-list">${chips.join('')}</div>`
+        : '<span class="member-none">参加者はまだいません</span>';
+    } else {
+      const bestOk = ev.dates.reduce((max, d) => Math.max(max, ev.counts?.[d.id]?.ok || 0), 0);
+      countHtml = `
+        <div class="dash-count-main">回答 ${ev.total_respondents}名</div>
+        <div class="dash-count-sub"><span>最多◯ ${bestOk}/${ev.capacity}名</span></div>
+      `;
+
+      membersHtml = ev.dates.map(d => {
+        const c = ev.counts?.[d.id] || { ok: 0, maybe: 0 };
+        const m = ev.date_members?.[d.id] || { ok: [], maybe: [] };
+        const chips = [];
+        m.ok.forEach(name => chips.push(`<span class="member-chip ok">◯ ${escapeHtml(name)}</span>`));
+        m.maybe.forEach(name => chips.push(`<span class="member-chip maybe">△ ${escapeHtml(name)}</span>`));
+        return `
+          <div class="dash-multi-row">
+            <div class="dash-multi-head">
+              <span>${escapeHtml(formatDateLabel(d.date, d.time))}</span>
+              <span>◯${c.ok}/${ev.capacity}名${c.maybe > 0 ? '・△' + c.maybe : ''}</span>
+            </div>
+            <div class="member-chip-list">
+              ${chips.length > 0 ? chips.join('') : '<span class="member-none">参加者なし</span>'}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    tr.innerHTML = `
+      <td class="col-info">${infoHtml}</td>
+      <td class="col-count">${countHtml}</td>
+      <td class="col-members">${membersHtml}</td>
+      <td class="col-action">
+        <div class="dash-action-cell">
+          <a href="${adminUrl}" class="btn btn-primary btn-sm">詳細</a>
+          <button type="button" class="btn btn-danger-outline btn-sm btn-dash-del">削除</button>
+        </div>
+      </td>
+    `;
+
+    tr.querySelector('.btn-dash-del').addEventListener('click', () => {
+      handleDeleteEventByIds(ev.id, ev.admin_key, ev.title, false);
+    });
+
+    tbody.appendChild(tr);
+  });
+}
+
+/* =====================================================
+   ビュー1：イベント新規作成画面
+===================================================== */
+function openCreateView(updateHistory = false) {
+  state.currentEventId = null;
+  state.currentAdminKey = null;
+  if (updateHistory) window.history.replaceState({}, '', `${getBaseUrl()}?view=create`);
+
+  hideAllViews();
+  setHeaderButtons('create');
+  $('view-create').classList.remove('hidden');
+  $('create-result').classList.add('hidden');
+  $('create-form').reset();
+  $('ev-capacity').value = '4';
+  $('ev-auto-close').checked = true;
+
+  renderLocationHistoryChips();
+
+  $('single-rows').innerHTML = '';
+  $('multi-rows').innerHTML = '';
+  addSingleDateRow(getTodayStr(1), '13', '00', '19', '00');
+  addMultiDateRow(getTodayStr(1), '13', '00', '', '00');
+  addMultiDateRow(getTodayStr(2), '13', '00', '', '00');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function openMultiPickForContainer(mode) {
@@ -862,44 +1546,8 @@ function openMultiPickForContainer(mode) {
       existingSet.add(dateStr);
       added++;
     });
-    if (added > 0) {
-      showToast(`${added}日分の日程を追加しました`);
-    } else {
-      showToast('選択した日付は既に追加済みです');
-    }
+    showToast(added > 0 ? `${added}日分の日程を追加しました` : '選択した日付は既に追加済みです');
   });
-}
-
-/* =====================================================
-   ビュー1：イベント作成画面
-===================================================== */
-async function initCreateView() {
-  hideAllViews();
-  $('view-create').classList.remove('hidden');
-
-  renderLocationHistoryChips();
-
-  $('single-rows').innerHTML = '';
-  $('multi-rows').innerHTML = '';
-  addSingleDateRow(getTodayStr(1), '13', '00', '19', '00');
-  addMultiDateRow(getTodayStr(1), '13', '00', '', '00');
-  addMultiDateRow(getTodayStr(2), '13', '00', '', '00');
-
-  if (state.lineProfile) {
-    try {
-      const res = await apiGet({
-        action: 'list_my_events',
-        line_uid: state.lineProfile.userId
-      });
-      if (res.ok && Array.isArray(res.events)) {
-        state.cloudMyEvents = res.events;
-      }
-    } catch (e) {
-      console.warn('作成済みイベント同期エラー:', e);
-    }
-  }
-
-  renderMyEventsHistory();
 }
 
 function addSingleDateRow(defaultDate = '', sh = '13', sm = '00', eh = '19', em = '00') {
@@ -927,12 +1575,8 @@ function addSingleDateRow(defaultDate = '', sh = '13', sm = '00', eh = '19', em 
 
   bindDatePickerToRow(div);
   bindTimeSelectEvents(div);
-
   div.querySelector('.btn-remove-row').addEventListener('click', () => {
-    if (container.children.length <= 1) {
-      showToast('日程は最低1件必要です');
-      return;
-    }
+    if (container.children.length <= 1) { showToast('日程は最低1件必要です'); return; }
     div.remove();
     renumberRows(container, '日程');
   });
@@ -963,12 +1607,8 @@ function addMultiDateRow(defaultDate = '', sh = '13', sm = '00', eh = '', em = '
 
   bindDatePickerToRow(div);
   bindTimeSelectEvents(div);
-
   div.querySelector('.btn-remove-row').addEventListener('click', () => {
-    if (container.children.length <= 1) {
-      showToast('候補日は最低1件必要です');
-      return;
-    }
+    if (container.children.length <= 1) { showToast('候補日は最低1件必要です'); return; }
     div.remove();
     renumberRows(container, '候補');
   });
@@ -981,7 +1621,6 @@ function bindDatePickerToRow(rowEl) {
   const hiddenInp = rowEl.querySelector('.inp-date');
   const btn = rowEl.querySelector('.date-picker-btn');
   const textSpan = rowEl.querySelector('.date-picker-text');
-
   btn.addEventListener('click', () => {
     openCalendarSingle(hiddenInp.value, (pickedStr) => {
       hiddenInp.value = pickedStr;
@@ -999,7 +1638,6 @@ function renumberRows(container, prefix) {
 
 async function handleCreateSubmit(e) {
   e.preventDefault();
-
   const baseTitle = $('ev-title').value.trim();
   const baseLocation = $('ev-location').value.trim();
   const capacity = Number($('ev-capacity').value) || 4;
@@ -1007,10 +1645,7 @@ async function handleCreateSubmit(e) {
   const notifyMode = $('ev-notify-mode') ? $('ev-notify-mode').value : 'all';
   const note = $('ev-note').value.trim();
 
-  if (!baseTitle) {
-    showToast('イベント名を入力してください');
-    return;
-  }
+  if (!baseTitle) { showToast('イベント名を入力してください'); return; }
 
   const eventsPayload = [];
   const locationsToSave = [];
@@ -1043,10 +1678,7 @@ async function handleCreateSubmit(e) {
       time: readTimeFromRow(row)
     })).filter(d => d.date);
 
-    if (dates.length === 0) {
-      showToast('候補日を1件以上選択してください');
-      return;
-    }
+    if (dates.length === 0) { showToast('候補日を1件以上選択してください'); return; }
     eventsPayload.push({
       mode: 'multi',
       title: baseTitle,
@@ -1059,10 +1691,7 @@ async function handleCreateSubmit(e) {
     });
   }
 
-  if (eventsPayload.length === 0) {
-    showToast('有効な日程を選択してください');
-    return;
-  }
+  if (eventsPayload.length === 0) { showToast('有効な日程を選択してください'); return; }
 
   showLoading('イベントを作成中...');
   try {
@@ -1075,15 +1704,10 @@ async function handleCreateSubmit(e) {
     if (!res.ok) throw new Error(res.error || '作成に失敗しました');
 
     locationsToSave.forEach(loc => saveLocationToHistory(loc));
-
     state.lastCreated = res.created || [];
-    state.lastCreated.forEach(ev => {
-      addMyEventHistory(ev);
-      if (state.lineProfile) state.cloudMyEvents.unshift(ev);
-    });
+    state.lastCreated.forEach(ev => addMyEventHistory(ev));
 
     renderCreatedResults(state.lastCreated);
-    renderMyEventsHistory();
     showToast(`${state.lastCreated.length}件のイベントを作成しました`);
     $('create-result').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (err) {
@@ -1117,13 +1741,13 @@ function renderCreatedResults(createdList) {
         ${escapeHtml(dateDesc)}${ev.location ? ' ／ ' + escapeHtml(ev.location) : ''} ／ 定員${ev.capacity}名
       </div>
       <div class="created-actions">
-        <button type="button" class="btn btn-line btn-sm btn-send-line">LINEで送る</button>
+        <a href="${adminUrl}" class="btn btn-primary btn-sm">詳細を開く（送信記録・編集）</a>
+        <button type="button" class="btn btn-line btn-sm btn-send-line">そのままLINE送信</button>
         <button type="button" class="btn btn-secondary btn-sm btn-copy-guest">招待URLコピー</button>
-        <a href="${adminUrl}" class="btn btn-primary btn-sm">幹事画面を開く</a>
       </div>
     `;
     card.querySelector('.btn-send-line').addEventListener('click', () => {
-      openLineShare(buildLineMessage(ev));
+      openLineShare(buildLineMessage(ev), buildInviteFlexMessage(ev));
     });
     card.querySelector('.btn-copy-guest').addEventListener('click', () => {
       copyToClipboard(guestUrl, '招待URLをコピーしました');
@@ -1143,59 +1767,8 @@ function handleBatchLineShare() {
     lines.push(buildGuestUrl(ev.id));
     lines.push('');
   });
-  openLineShare(lines.join('\n'));
-}
-
-function renderMyEventsHistory() {
-  const mergedMap = new Map();
-  state.cloudMyEvents.forEach(ev => mergedMap.set(ev.id, ev));
-  loadLocalMyEvents().forEach(ev => {
-    if (!mergedMap.has(ev.id)) mergedMap.set(ev.id, ev);
-  });
-  const list = Array.from(mergedMap.values());
-
-  const sec = $('my-events-section');
-  const container = $('my-events-list');
-
-  if (list.length === 0) {
-    sec.classList.add('hidden');
-    return;
-  }
-
-  sec.classList.remove('hidden');
-  container.innerHTML = '';
-
-  list.forEach(ev => {
-    const adminUrl = buildAdminUrl(ev.id, ev.admin_key);
-    const dateDesc = ev.mode === 'single' && ev.dates && ev.dates[0]
-      ? formatDateLabel(ev.dates[0].date, ev.dates[0].time)
-      : `候補日 ${(ev.dates || []).length}件`;
-
-    const div = document.createElement('div');
-    div.className = 'history-item';
-    div.innerHTML = `
-      <div class="history-item-title">${escapeHtml(ev.title)}</div>
-      <div class="history-item-sub">
-        ${escapeHtml(dateDesc)}${ev.location ? ' ／ ' + escapeHtml(ev.location) : ''}
-      </div>
-      <div class="created-actions">
-        <a href="${adminUrl}" class="btn btn-primary btn-sm">幹事画面へ</a>
-        <button type="button" class="btn btn-line btn-sm btn-hist-line">LINEで追加送信</button>
-        <button type="button" class="btn btn-secondary btn-sm btn-hist-copy">招待URL</button>
-        <button type="button" class="btn btn-danger-outline btn-sm btn-hist-delete">完全削除</button>
-      </div>
-    `;
-    div.querySelector('.btn-hist-line').addEventListener('click', () => {
-      openLineShare(buildLineMessage(ev));
-    });
-    div.querySelector('.btn-hist-copy').addEventListener('click', () => {
-      copyToClipboard(buildGuestUrl(ev.id), '招待URLをコピーしました');
-    });
-    div.querySelector('.btn-hist-delete').addEventListener('click', () => {
-      handleDeleteEventByIds(ev.id, ev.admin_key, ev.title, false);
-    });
-    container.appendChild(div);
-  });
+  const flexCarousel = buildBatchInviteFlexMessage(state.lastCreated);
+  openLineShare(lines.join('\n'), flexCarousel);
 }
 
 async function handleDeleteEventByIds(eventId, adminKey, title, redirectAfter) {
@@ -1213,18 +1786,12 @@ async function handleDeleteEventByIds(eventId, adminKey, title, redirectAfter) {
     if (!res.ok) throw new Error(res.error || '削除に失敗しました');
 
     removeMyEventHistory(eventId);
-    state.lastCreated = state.lastCreated.filter(e => e.id !== eventId);
     showToast('スプレッドシートから完全に削除しました');
 
     if (redirectAfter) {
       window.location.href = getBaseUrl();
     } else {
-      renderMyEventsHistory();
-      if (state.lastCreated.length === 0) {
-        $('create-result').classList.add('hidden');
-      } else {
-        renderCreatedResults(state.lastCreated);
-      }
+      renderDashboardAll();
     }
   } catch (err) {
     alert('削除エラー: ' + err.message);
@@ -1259,6 +1826,8 @@ async function loadEventAndRender() {
       state.invitedMemo = Array.isArray(res.invited_memo) ? res.invited_memo : [];
       renderAdminView(res);
     } else {
+      // プレビューでなければ「招待されているイベント」としてローカル記憶
+      if (!state.forcePreview) addInvitedEventHistory(res.event.id);
       renderGuestView(res);
     }
   } catch (err) {
@@ -1299,10 +1868,10 @@ function renderEventMeta(metaEl, noteBoxEl, ev) {
 
 function renderGuestView(data) {
   hideAllViews();
+  setHeaderButtons('guest');
   $('view-guest').classList.remove('hidden');
 
   const { event: ev, counts, my_response: myRes } = data;
-
   $('guest-title').textContent = ev.title;
   renderEventMeta($('guest-meta'), $('guest-note-box'), ev);
 
@@ -1312,11 +1881,9 @@ function renderGuestView(data) {
     badges.push('<span class="badge badge-closed">受付終了</span>');
   } else if (ev.mode === 'single') {
     const okCnt = counts[ev.dates[0].id]?.ok || 0;
-    if (okCnt >= ev.capacity) {
-      badges.push('<span class="badge badge-full">満員（キャンセル待ち）</span>');
-    } else {
-      badges.push(`<span class="badge badge-open">募集中（残り${ev.capacity - okCnt}枠）</span>`);
-    }
+    badges.push(okCnt >= ev.capacity
+      ? '<span class="badge badge-full">満員（キャンセル待ち）</span>'
+      : `<span class="badge badge-open">募集中（残り${ev.capacity - okCnt}枠）</span>`);
   } else {
     badges.push('<span class="badge badge-open">日程調整中</span>');
   }
@@ -1329,27 +1896,16 @@ function renderGuestView(data) {
     const rem = Math.max(0, ev.capacity - c.ok);
     statusArea.innerHTML = `
       <div class="count-box-grid">
-        <div class="count-box ok">
-          <span class="count-num">${c.ok} / ${ev.capacity}</span>
-          <span class="count-lbl">参加</span>
-        </div>
-        <div class="count-box maybe">
-          <span class="count-num">${c.maybe}名</span>
-          <span class="count-lbl">保留・調整中</span>
-        </div>
-        <div class="count-box rem">
-          <span class="count-num">${rem === 0 ? '満員' : 'あと' + rem + '名'}</span>
-          <span class="count-lbl">${rem === 0 ? 'キャンセル待ち' : '残り枠'}</span>
-        </div>
+        <div class="count-box ok"><span class="count-num">${c.ok} / ${ev.capacity}</span><span class="count-lbl">参加</span></div>
+        <div class="count-box maybe"><span class="count-num">${c.maybe}名</span><span class="count-lbl">保留・調整中</span></div>
+        <div class="count-box rem"><span class="count-num">${rem === 0 ? '満員' : 'あと' + rem + '名'}</span><span class="count-lbl">${rem === 0 ? 'キャンセル待ち' : '残り枠'}</span></div>
       </div>
     `;
   } else {
     statusArea.innerHTML = ev.dates.map(d => {
       const c = counts[d.id] || { ok: 0, maybe: 0, ng: 0 };
       const rem = Math.max(0, ev.capacity - c.ok);
-      const badgeHtml = rem === 0
-        ? '<span class="badge badge-full">満員</span>'
-        : `<span class="badge badge-open">残り${rem}枠</span>`;
+      const badgeHtml = rem === 0 ? '<span class="badge badge-full">満員</span>' : `<span class="badge badge-open">残り${rem}枠</span>`;
       return `
         <div class="multi-status-row">
           <strong>${escapeHtml(formatDateLabel(d.date, d.time))}</strong>
@@ -1405,31 +1961,16 @@ function renderGuestChoiceInputs(ev, counts, myRes) {
 
     const block = document.createElement('div');
     block.className = ev.mode === 'multi' ? 'multi-day-item' : 'form-group';
-
     const headerHtml = ev.mode === 'multi'
-      ? `
-        <div class="multi-day-head">
-          <span class="multi-day-label">${escapeHtml(formatDateLabel(d.date, d.time))}</span>
-          ${isFullLocked ? '<span class="badge badge-full">満員（キャンセル待ち可）</span>' : ''}
-        </div>
-      `
+      ? `<div class="multi-day-head"><span class="multi-day-label">${escapeHtml(formatDateLabel(d.date, d.time))}</span>${isFullLocked ? '<span class="badge badge-full">満員（キャンセル待ち可）</span>' : ''}</div>`
       : `<label>参加可否 <span class="req">必須</span>${isFullLocked ? ' <span class="badge badge-full">現在満員・保留でキャンセル待ち</span>' : ''}</label>`;
 
     block.innerHTML = `
       ${headerHtml}
       <div class="choice-grid" data-date-id="${escapeHtml(d.id)}">
-        <button type="button" class="choice-btn ${currentVal === 'ok' ? 'selected-ok' : ''}" data-val="ok" ${ev.is_closed || isFullLocked ? 'disabled' : ''}>
-          ◯ 参加
-          <small>${isFullLocked ? '満員' : 'いけます'}</small>
-        </button>
-        <button type="button" class="choice-btn ${currentVal === 'maybe' ? 'selected-maybe' : ''}" data-val="maybe" ${ev.is_closed ? 'disabled' : ''}>
-          △ 保留
-          <small>${isFullLocked ? 'キャンセル待ち' : '調整中'}</small>
-        </button>
-        <button type="button" class="choice-btn ${currentVal === 'ng' ? 'selected-ng' : ''}" data-val="ng" ${ev.is_closed ? 'disabled' : ''}>
-          ✕ 不参加
-          <small>今回は見送り</small>
-        </button>
+        <button type="button" class="choice-btn ${currentVal === 'ok' ? 'selected-ok' : ''}" data-val="ok" ${ev.is_closed || isFullLocked ? 'disabled' : ''}>◯ 参加<small>${isFullLocked ? '満員' : 'いけます'}</small></button>
+        <button type="button" class="choice-btn ${currentVal === 'maybe' ? 'selected-maybe' : ''}" data-val="maybe" ${ev.is_closed ? 'disabled' : ''}>△ 保留<small>${isFullLocked ? 'キャンセル待ち' : '調整中'}</small></button>
+        <button type="button" class="choice-btn ${currentVal === 'ng' ? 'selected-ng' : ''}" data-val="ng" ${ev.is_closed ? 'disabled' : ''}>✕ 不参加<small>今回は見送り</small></button>
       </div>
     `;
 
@@ -1437,9 +1978,7 @@ function renderGuestChoiceInputs(ev, counts, myRes) {
       btn.addEventListener('click', () => {
         const val = btn.dataset.val;
         state.guestAnswers[d.id] = val;
-        block.querySelectorAll('.choice-btn').forEach(b => {
-          b.classList.remove('selected-ok', 'selected-maybe', 'selected-ng');
-        });
+        block.querySelectorAll('.choice-btn').forEach(b => b.classList.remove('selected-ok', 'selected-maybe', 'selected-ng'));
         btn.classList.add(`selected-${val}`);
       });
     });
@@ -1456,16 +1995,9 @@ async function handleGuestSubmit(e) {
   const name = $('guest-name').value.trim();
   const conditionMemo = $('guest-condition-memo').value.trim();
 
-  if (!name) {
-    showToast('名前を入力してください');
-    return;
-  }
-
+  if (!name) { showToast('名前を入力してください'); return; }
   for (const d of ev.dates) {
-    if (!state.guestAnswers[d.id]) {
-      showToast('すべての日程で ◯ / △ / ✕ を選択してください');
-      return;
-    }
+    if (!state.guestAnswers[d.id]) { showToast('すべての日程で ◯ / △ / ✕ を選択してください'); return; }
   }
 
   showLoading('回答を送信中...');
@@ -1489,6 +2021,7 @@ async function handleGuestSubmit(e) {
 
     localStorage.setItem(STORAGE_GUEST_NAME, name);
     setMyResponseId(ev.id, res.response_id);
+    if (!state.forcePreview) addInvitedEventHistory(ev.id);
     showToast('回答を送信しました！');
     await loadEventAndRender();
   } catch (err) {
@@ -1499,10 +2032,11 @@ async function handleGuestSubmit(e) {
 }
 
 /* =====================================================
-   ビュー3：幹事専用管理画面
+   ビュー3：イベント詳細・幹事管理画面
 ===================================================== */
 function renderAdminView(data) {
   hideAllViews();
+  setHeaderButtons('admin');
   $('view-admin').classList.remove('hidden');
 
   const { event: ev, counts, responses = [] } = data;
@@ -1524,19 +2058,216 @@ function renderAdminView(data) {
   }
 
   $('toggle-manual-close').checked = Boolean(ev.is_closed);
+  $('admin-edit-title').value = ev.title;
   $('admin-edit-capacity').value = ev.capacity;
   $('admin-edit-location').value = ev.location;
   $('admin-edit-auto-close').checked = Boolean(ev.auto_close);
-  if ($('admin-edit-notify-mode')) {
-    $('admin-edit-notify-mode').value = ev.notify_mode || 'all';
-  }
+  if ($('admin-edit-notify-mode')) $('admin-edit-notify-mode').value = ev.notify_mode || 'all';
   $('admin-edit-note').value = ev.note;
 
+  renderAdminEditDates(ev);
   renderAdminResponses(ev, counts, responses);
   setupConfirmSection(ev, counts);
-  renderInvitedMemoList(responses);
+  renderInvitedMemoList(ev, responses);
+  renderFriendHistoryChips();
 }
 
+/* =====================================================
+   詳細画面の日時・候補日編集
+===================================================== */
+function renderAdminEditDates(ev) {
+  const container = $('admin-edit-dates-rows');
+  const actionsWrap = $('admin-edit-dates-actions');
+  const labelEl = $('admin-edit-dates-label');
+  const isMulti = ev.mode === 'multi';
+
+  labelEl.textContent = isMulti ? '候補日時の編集（追加・削除可）' : '開催日時の編集';
+  actionsWrap.classList.toggle('hidden', !isMulti);
+  container.innerHTML = '';
+
+  (ev.dates || []).forEach(d => addAdminEditDateRow(d, isMulti));
+}
+
+function addAdminEditDateRow(dateObj, isMulti, overrideTime = null) {
+  const container = $('admin-edit-dates-rows');
+  const dateVal = dateObj.date || getTodayStr(1);
+  const parsed = overrideTime || parseTimeString(dateObj.time, isMulti ? '' : '19');
+  const idx = container.children.length + 1;
+
+  const div = document.createElement('div');
+  div.className = 'date-row-card';
+  div.dataset.dateId = dateObj.id || '';
+  div.innerHTML = `
+    <div class="date-row-head">
+      <span class="row-num">${isMulti ? '候補 #' + idx : '開催日時'}</span>
+      ${isMulti ? '<button type="button" class="btn-remove-row">削除</button>' : ''}
+    </div>
+    <input type="hidden" class="inp-date" value="${escapeHtml(dateVal)}" />
+    <button type="button" class="date-picker-btn">
+      <span class="date-picker-text">${escapeHtml(formatDateButtonLabel(dateVal))}</span>
+      <span class="cal-icon">カレンダー変更</span>
+    </button>
+    ${buildTimeSelectHtml(parsed.sh, parsed.sm, parsed.eh, parsed.em)}
+  `;
+
+  bindDatePickerToRow(div);
+  bindTimeSelectEvents(div);
+
+  if (isMulti) {
+    div.querySelector('.btn-remove-row').addEventListener('click', () => {
+      if (container.children.length <= 1) { showToast('候補日は最低1件必要です'); return; }
+      div.remove();
+      renumberRows(container, '候補');
+    });
+  }
+
+  container.appendChild(div);
+  if (isMulti) renumberRows(container, '候補');
+}
+
+/* =====================================================
+   LINE招待送信 ＆ 誤送信防止管理
+===================================================== */
+async function recordInviteTargets(names, openShareAfter) {
+  if (!state.eventData) return;
+
+  const duplicates = [];
+  names.forEach(name => {
+    const found = state.invitedMemo.find(m => normalizeName(m.name) === normalizeName(name));
+    if (found) {
+      const timeTxt = found.sent_at ? formatShortTimestamp(found.sent_at) + ' 送信済' : '送信済';
+      duplicates.push(`・${found.name}（${timeTxt}）`);
+    }
+  });
+
+  if (duplicates.length > 0) {
+    const ok = confirm(`以下の相手にはすでに招待URLを送信済みです：\n${duplicates.join('\n')}\n\n重複して送信（再送）してもよろしいですか？`);
+    if (!ok) return;
+  }
+
+  const nowIso = new Date().toISOString();
+  if (names.length > 0) {
+    names.forEach(name => {
+      saveFriendToHistory(name);
+      const existing = state.invitedMemo.find(m => normalizeName(m.name) === normalizeName(name));
+      if (existing) {
+        existing.sent_at = nowIso;
+      } else {
+        state.invitedMemo.unshift({
+          id: 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+          name,
+          sent_at: nowIso,
+          note: '',
+          done: false
+        });
+      }
+    });
+    $('invite-target-names').value = '';
+    await persistInvitedMemo(false);
+  }
+
+  if (openShareAfter) {
+    const ev = state.eventData.event;
+    openLineShare(buildLineMessage(ev), buildInviteFlexMessage(ev));
+  }
+}
+
+async function handleAdminInviteSend() {
+  if (!state.eventData) return;
+  await recordInviteTargets(splitTargetNames($('invite-target-names').value), true);
+}
+
+async function handleInviteRecordOnly() {
+  const names = splitTargetNames($('invite-target-names').value);
+  if (names.length === 0) {
+    showToast('記録するフレンド名を入力してください');
+    $('invite-target-names').focus();
+    return;
+  }
+  await recordInviteTargets(names, false);
+}
+
+function getMemberReplyStatus(ev, responses, friendName) {
+  const target = normalizeName(friendName);
+  const resp = responses.find(r => normalizeName(r.name) === target);
+  if (!resp) return null;
+
+  if (ev.mode === 'single' && ev.dates[0]) {
+    const ans = resp.answers[ev.dates[0].id];
+    if (ans === 'ok') return { text: '◯ 参加済', cls: 'memo-status-ok' };
+    if (ans === 'maybe') return { text: '△ 保留', cls: 'memo-status-maybe' };
+    if (ans === 'ng') return { text: '✕ 不参加', cls: 'memo-status-ng' };
+  }
+  const hasOk = ev.dates.some(d => resp.answers[d.id] === 'ok');
+  return hasOk ? { text: '回答済（◯あり）', cls: 'memo-status-ok' } : { text: '回答済', cls: 'memo-status-done' };
+}
+
+function renderInvitedMemoList(ev, responses) {
+  const container = $('invited-memo-list');
+  const countBadge = $('invited-memo-count');
+  if (countBadge) countBadge.textContent = `送信済 ${state.invitedMemo.length}名`;
+
+  if (state.invitedMemo.length === 0) {
+    container.innerHTML = '<p class="muted-text" style="margin:0;">まだ送信記録はありません。上の入力欄に相手名を入れて送信すると自動で履歴に残ります。</p>';
+    return;
+  }
+
+  container.innerHTML = '';
+  state.invitedMemo.forEach(item => {
+    const replyStatus = getMemberReplyStatus(ev, responses, item.name);
+    const badgeText = replyStatus ? replyStatus.text : (item.done ? '確認済' : '未返事');
+    const badgeCls = replyStatus ? replyStatus.cls : (item.done ? 'memo-status-done' : 'memo-status-wait');
+    const sentTimeLabel = item.sent_at ? `${formatShortTimestamp(item.sent_at)} 送信` : '';
+
+    const row = document.createElement('div');
+    row.className = 'memo-row';
+    row.innerHTML = `
+      <div class="memo-row-left">
+        <button type="button" class="memo-status-badge ${badgeCls}">${escapeHtml(badgeText)}</button>
+        <strong>${escapeHtml(item.name)}</strong>
+        ${sentTimeLabel ? `<span class="memo-sent-time">${escapeHtml(sentTimeLabel)}</span>` : ''}
+      </div>
+      <button type="button" class="btn-text-danger btn-del-memo">削除</button>
+    `;
+
+    row.querySelector('.memo-status-badge').addEventListener('click', async () => {
+      if (replyStatus) { showToast('回答一覧と自動照合されています'); return; }
+      item.done = !item.done;
+      await persistInvitedMemo(true);
+    });
+
+    row.querySelector('.btn-del-memo').addEventListener('click', async () => {
+      state.invitedMemo = state.invitedMemo.filter(m => m.id !== item.id);
+      await persistInvitedMemo(true);
+    });
+
+    container.appendChild(row);
+  });
+}
+
+async function persistInvitedMemo(showSavedToast = true) {
+  if (state.eventData) {
+    renderInvitedMemoList(state.eventData.event, state.eventData.responses || []);
+    renderFriendHistoryChips();
+  }
+  try {
+    const res = await apiPost({
+      action: 'admin_update',
+      event_id: state.currentEventId,
+      admin_key: state.currentAdminKey,
+      line_user_id: state.lineProfile?.userId || '',
+      updates: { invited_memo: state.invitedMemo }
+    });
+    if (!res.ok) throw new Error(res.error);
+    if (showSavedToast) showToast('送信済みリストを更新しました');
+  } catch (err) {
+    alert('保存エラー: ' + err.message);
+  }
+}
+
+/* =====================================================
+   出欠一覧描画（幹事限定）
+===================================================== */
 function renderAdminResponses(ev, counts, responses) {
   const summaryEl = $('admin-summary-area');
   const listEl = $('admin-responses-area');
@@ -1548,23 +2279,14 @@ function renderAdminResponses(ev, counts, responses) {
 
     summaryEl.innerHTML = `
       <div class="count-box-grid">
-        <div class="count-box ok">
-          <span class="count-num">${c.ok} / ${ev.capacity}</span>
-          <span class="count-lbl">参加</span>
-        </div>
-        <div class="count-box maybe">
-          <span class="count-num">${c.maybe}名</span>
-          <span class="count-lbl">保留</span>
-        </div>
-        <div class="count-box rem">
-          <span class="count-num">${rem === 0 ? '満員' : 'あと' + rem + '名'}</span>
-          <span class="count-lbl">不参加 ${c.ng}名</span>
-        </div>
+        <div class="count-box ok"><span class="count-num">${c.ok} / ${ev.capacity}</span><span class="count-lbl">参加</span></div>
+        <div class="count-box maybe"><span class="count-num">${c.maybe}名</span><span class="count-lbl">保留</span></div>
+        <div class="count-box rem"><span class="count-num">${rem === 0 ? '満員' : 'あと' + rem + '名'}</span><span class="count-lbl">不参加 ${c.ng}名</span></div>
       </div>
     `;
 
     if (responses.length === 0) {
-      listEl.innerHTML = '<p class="muted-text">まだ回答はありません。上のボタンからLINEでフレンドを招待しましょう。</p>';
+      listEl.innerHTML = '<p class="muted-text">まだ回答はありません。上の招待エリアからLINEでフレンドを誘いましょう。</p>';
       return;
     }
 
@@ -1624,20 +2346,15 @@ function renderAdminResponses(ev, counts, responses) {
     const markText = { ok: '◯', maybe: '△', ng: '✕' };
     const tableWrap = document.createElement('div');
     tableWrap.className = 'table-scroll';
-
     const headCols = ev.dates.map(d => `<th>${escapeHtml(formatDateLabel(d.date, d.time))}</th>`).join('');
     const bodyRows = responses.map((r, idx) => {
       const cells = ev.dates.map(d => {
         const ans = r.answers[d.id] || '';
-        const cls = ans ? `mark-${ans}` : '';
-        return `<td class="${cls}">${markText[ans] || '-'}</td>`;
+        return `<td class="${ans ? 'mark-' + ans : ''}">${markText[ans] || '-'}</td>`;
       }).join('');
       return `
         <tr>
-          <td>
-            <strong>${escapeHtml(r.name)}</strong>
-            <div class="resp-time">${escapeHtml(formatShortTimestamp(r.updated_at))}</div>
-          </td>
+          <td><strong>${escapeHtml(r.name)}</strong><div class="resp-time">${escapeHtml(formatShortTimestamp(r.updated_at))}</div></td>
           ${cells}
           <td style="text-align:left;min-width:120px;">${escapeHtml(r.condition_memo || '-')}</td>
           <td><button type="button" class="btn-text-danger btn-del-matrix" data-idx="${idx}">削除</button></td>
@@ -1647,14 +2364,7 @@ function renderAdminResponses(ev, counts, responses) {
 
     tableWrap.innerHTML = `
       <table class="matrix-table">
-        <thead>
-          <tr>
-            <th>名前</th>
-            ${headCols}
-            <th>条件メモ</th>
-            <th>操作</th>
-          </tr>
-        </thead>
+        <thead><tr><th>名前</th>${headCols}<th>条件メモ</th><th>操作</th></tr></thead>
         <tbody>${bodyRows}</tbody>
       </table>
     `;
@@ -1693,93 +2403,7 @@ async function handleDeleteResponse(resp) {
 }
 
 /* =====================================================
-   声かけ済みメモ（幹事専用）
-===================================================== */
-function normalizeName(s) {
-  return String(s || '').replace(/\s+/g, '').toLowerCase();
-}
-
-function renderInvitedMemoList(responses) {
-  const container = $('invited-memo-list');
-  const answeredNames = new Set(responses.map(r => normalizeName(r.name)));
-
-  if (state.invitedMemo.length === 0) {
-    container.innerHTML = '<p class="muted-text" style="margin:0;">まだ声かけメモはありません。</p>';
-    return;
-  }
-
-  container.innerHTML = '';
-  state.invitedMemo.forEach(item => {
-    const autoMatched = answeredNames.has(normalizeName(item.name));
-    const isDone = autoMatched || Boolean(item.done);
-
-    const row = document.createElement('div');
-    row.className = 'memo-row';
-    row.innerHTML = `
-      <div class="memo-row-left">
-        <button type="button" class="memo-status-btn ${isDone ? 'memo-status-done' : 'memo-status-wait'}">
-          ${autoMatched ? '回答済（自動）' : (isDone ? '確認済' : '未返事')}
-        </button>
-        <strong>${escapeHtml(item.name)}</strong>
-        ${item.note ? `<span class="memo-note-text">${escapeHtml(item.note)}</span>` : ''}
-      </div>
-      <button type="button" class="btn-text-danger btn-del-memo">削除</button>
-    `;
-
-    row.querySelector('.memo-status-btn').addEventListener('click', async () => {
-      if (autoMatched) {
-        showToast('回答一覧に一致するため自動で回答済になっています');
-        return;
-      }
-      item.done = !item.done;
-      await persistInvitedMemo();
-    });
-
-    row.querySelector('.btn-del-memo').addEventListener('click', async () => {
-      state.invitedMemo = state.invitedMemo.filter(m => m.id !== item.id);
-      await persistInvitedMemo();
-    });
-
-    container.appendChild(row);
-  });
-}
-
-async function handleAddInvitedMemo(e) {
-  e.preventDefault();
-  const name = $('memo-friend-name').value.trim();
-  const note = $('memo-friend-note').value.trim();
-  if (!name) return;
-
-  state.invitedMemo.push({
-    id: 'm_' + Date.now(),
-    name,
-    note,
-    done: false
-  });
-  $('memo-friend-name').value = '';
-  $('memo-friend-note').value = '';
-  await persistInvitedMemo();
-}
-
-async function persistInvitedMemo() {
-  renderInvitedMemoList(state.eventData?.responses || []);
-  try {
-    const res = await apiPost({
-      action: 'admin_update',
-      event_id: state.currentEventId,
-      admin_key: state.currentAdminKey,
-      line_user_id: state.lineProfile?.userId || '',
-      updates: { invited_memo: state.invitedMemo }
-    });
-    if (!res.ok) throw new Error(res.error);
-    showToast('声かけメモを保存しました');
-  } catch (err) {
-    alert('保存エラー: ' + err.message);
-  }
-}
-
-/* =====================================================
-   幹事設定の保存・締切
+   イベント編集保存（日時・候補日含む）＆締切スイッチ
 ===================================================== */
 async function handleManualCloseToggle() {
   const isClosed = $('toggle-manual-close').checked;
@@ -1803,13 +2427,28 @@ async function handleManualCloseToggle() {
 }
 
 async function handleAdminSaveSettings() {
+  const title = $('admin-edit-title').value.trim();
   const capacity = Number($('admin-edit-capacity').value) || 4;
   const location = $('admin-edit-location').value.trim();
   const autoClose = $('admin-edit-auto-close').checked;
   const notifyMode = $('admin-edit-notify-mode') ? $('admin-edit-notify-mode').value : 'all';
   const note = $('admin-edit-note').value.trim();
 
-  showLoading('設定を保存中...');
+  if (!title) { showToast('イベント名を入力してください'); return; }
+
+  const dateRows = Array.from($('admin-edit-dates-rows').children);
+  const editedDates = dateRows.map(row => ({
+    id: row.dataset.dateId || '',
+    date: row.querySelector('.inp-date').value.trim(),
+    time: readTimeFromRow(row)
+  })).filter(d => d.date);
+
+  if (editedDates.length === 0) {
+    showToast('有効な日程を1件以上設定してください');
+    return;
+  }
+
+  showLoading('編集内容を保存中...');
   try {
     const res = await apiPost({
       action: 'admin_update',
@@ -1817,16 +2456,18 @@ async function handleAdminSaveSettings() {
       admin_key: state.currentAdminKey,
       line_user_id: state.lineProfile?.userId || '',
       updates: {
+        title,
         capacity,
         location,
         auto_close: autoClose,
         notify_mode: notifyMode,
-        note
+        note,
+        dates: editedDates
       }
     });
     if (!res.ok) throw new Error(res.error);
     if (location) saveLocationToHistory(location);
-    showToast('設定を保存しました');
+    showToast('編集内容を保存しました');
     await loadEventAndRender();
   } catch (err) {
     alert('保存エラー: ' + err.message);

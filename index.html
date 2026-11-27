@@ -13,7 +13,10 @@
         <span class="brand-tile">發</span>
         <span>麻雀セット出欠</span>
       </a>
-      <button id="btn-go-create" class="btn btn-sm btn-outline-light" type="button">＋ 新規作成</button>
+      <div class="header-actions">
+        <button id="btn-go-home" class="btn btn-sm btn-outline-light hidden" type="button">一覧へ</button>
+        <button id="btn-go-create" class="btn btn-sm btn-outline-light" type="button">＋ 新規作成</button>
+      </div>
     </div>
   </header>
 
@@ -29,17 +32,106 @@
       <h2>読み込みエラー</h2>
       <p id="error-message"></p>
       <div class="actions-row">
-        <a href="?" class="btn btn-primary">イベント作成画面へ</a>
+        <a href="?" class="btn btn-primary">イベント一覧へ戻る</a>
       </div>
     </section>
 
     <!-- =====================================
-         ビュー1：イベント作成画面
+         ビュー0：トップ画面（イベント一覧ダッシュボード）
+    ===================================== -->
+    <section id="view-home" class="hidden">
+      <!-- 共通ヘッダ＆フィルタバー -->
+      <div class="card filter-panel">
+        <div class="dashboard-head" style="margin-bottom:12px;">
+          <div>
+            <h1 class="section-title" style="margin-bottom:4px;">イベント一覧</h1>
+            <p class="muted-text" style="margin:0;">自分が立てたイベントと招待されたイベントをまとめて確認できます。</p>
+          </div>
+          <div class="dashboard-head-btns">
+            <button type="button" id="btn-home-refresh" class="btn btn-secondary btn-sm">最新に更新</button>
+            <button type="button" id="btn-home-create" class="btn btn-primary btn-sm">＋ イベント新規作成</button>
+          </div>
+        </div>
+
+        <div id="dashboard-filter-bar" class="filter-bar" role="tablist">
+          <button type="button" class="filter-btn active" data-filter="all">すべて</button>
+          <button type="button" class="filter-btn" data-filter="open">募集中</button>
+          <button type="button" class="filter-btn" data-filter="full">満員</button>
+          <button type="button" class="filter-btn" data-filter="closed">締切中</button>
+        </div>
+      </div>
+
+      <!-- 招待されているイベント一覧（ゲスト用：人数と自分の回答状況のみ表示） -->
+      <div id="home-invited-card" class="card dashboard-card invited-card hidden">
+        <div class="card-head-row">
+          <h2 class="section-title">招待されているイベント</h2>
+          <span id="invited-count-badge" class="badge badge-open">0件</span>
+        </div>
+        <p class="muted-text">招待URLを受け取ったイベントです。参加人数とご自身の回答状況を確認できます。</p>
+
+        <div id="invited-filter-empty" class="filter-empty-msg hidden">
+          選択中のフィルタ条件に該当する招待イベントはありません。
+        </div>
+
+        <div id="invited-table-wrap" class="dashboard-table-wrap">
+          <table class="dashboard-table">
+            <thead>
+              <tr>
+                <th class="col-info">日時・イベント / 場所</th>
+                <th class="col-count">参加状況</th>
+                <th class="col-members">あなたの回答</th>
+                <th class="col-action">操作</th>
+              </tr>
+            </thead>
+            <tbody id="invited-list"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 自分が立てたイベント一覧（幹事用：人数・参加者名・詳細ボタン） -->
+      <div id="home-admin-card" class="card dashboard-card">
+        <div class="card-head-row">
+          <h2 class="section-title">自分が立てたイベント（幹事）</h2>
+          <span id="admin-count-badge" class="badge">0件</span>
+        </div>
+
+        <div id="dashboard-empty" class="empty-box hidden">
+          <p class="empty-title">自分が立てたイベントはまだありません</p>
+          <p class="muted-text">下のボタンから麻雀セットのイベントを作成してください。</p>
+          <button type="button" id="btn-empty-create" class="btn btn-primary btn-lg">＋ イベントを新規作成する</button>
+        </div>
+
+        <div id="dashboard-filter-empty" class="filter-empty-msg hidden">
+          選択中のフィルタ条件に該当するイベントはありません。
+        </div>
+
+        <div id="dashboard-table-wrap" class="dashboard-table-wrap hidden">
+          <table class="dashboard-table">
+            <thead>
+              <tr>
+                <th class="col-info">日時・イベント / 場所</th>
+                <th class="col-count">参加状況</th>
+                <th class="col-members">参加メンバー</th>
+                <th class="col-action">操作</th>
+              </tr>
+            </thead>
+            <tbody id="dashboard-list"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- =====================================
+         ビュー1：イベント新規作成画面
     ===================================== -->
     <section id="view-create" class="hidden">
+      <div class="sub-nav-row">
+        <button type="button" id="btn-create-back-home" class="btn btn-secondary btn-sm">← イベント一覧に戻る</button>
+      </div>
+
       <div class="card">
-        <h1 class="section-title">セットイベントを作成</h1>
-        <p class="muted-text">作成すると「招待用URL（人数のみ表示）」と「幹事用URL（名前・条件メモ確認）」が発行されます。開催から7日経過したイベントは自動削除されます。</p>
+        <h1 class="section-title">セットイベントを新規作成</h1>
+        <p class="muted-text">作成すると「招待用URL（人数のみ表示）」と「幹事用URL（詳細管理）」が発行されます。開催から7日経過したイベントは自動削除されます。</p>
 
         <div class="mode-tabs" role="tablist">
           <button type="button" class="mode-tab active" data-mode="single">
@@ -93,7 +185,7 @@
             </select>
           </div>
 
-          <!-- 日程入力エリア（単日モード：1件〜複数一括） -->
+          <!-- 日程入力エリア（単日モード） -->
           <div id="single-dates-area" class="dates-panel">
             <div class="dates-panel-head">
               <label>開催日時 <span class="req">必須</span></label>
@@ -110,7 +202,7 @@
             </div>
           </div>
 
-          <!-- 日程入力エリア（複数候補日：日程調整モード） -->
+          <!-- 日程入力エリア（複数候補日モード） -->
           <div id="multi-dates-area" class="dates-panel hidden">
             <div class="dates-panel-head">
               <label>候補日時リスト <span class="req">必須</span></label>
@@ -138,8 +230,11 @@
 
       <!-- 作成完了結果エリア -->
       <div id="create-result" class="card result-card hidden">
-        <h2 class="section-title">イベントを作成しました</h2>
-        <p class="muted-text">幹事用URLはこの端末に自動保存されました。フレンドへは「招待URL」をLINEで送信してください。</p>
+        <div class="card-head-row">
+          <h2 class="section-title">イベントを作成しました</h2>
+          <button type="button" id="btn-result-go-home" class="btn btn-secondary btn-sm">イベント一覧へ</button>
+        </div>
+        <p class="muted-text">フレンドへ招待カードを送るか、「詳細を開く」から送信先を記録しながらLINE送信できます。</p>
         <div id="batch-line-wrap" class="batch-line-wrap hidden">
           <button type="button" id="btn-batch-line-share" class="btn btn-line btn-block">
             作成した全日程をまとめてLINEで送る
@@ -147,21 +242,16 @@
         </div>
         <div id="created-list" class="created-list"></div>
       </div>
-
-      <!-- 自分が作成したイベント一覧 -->
-      <div id="my-events-section" class="card hidden">
-        <div class="card-head-row">
-          <h2 class="section-title">自分が作成したイベント（幹事用）</h2>
-          <button type="button" id="btn-clear-history" class="btn-text-danger">表示履歴のみクリア</button>
-        </div>
-        <div id="my-events-list" class="my-events-list"></div>
-      </div>
     </section>
 
     <!-- =====================================
          ビュー2：招待回答画面（ゲスト用）
     ===================================== -->
     <section id="view-guest" class="hidden">
+      <div class="sub-nav-row">
+        <button type="button" id="btn-guest-go-home" class="btn btn-secondary btn-sm">← イベント一覧を見る</button>
+      </div>
+
       <div class="card event-hero">
         <div class="hero-badges" id="guest-badges"></div>
         <h1 id="guest-title" class="event-title"></h1>
@@ -202,35 +292,66 @@
     </section>
 
     <!-- =====================================
-         ビュー3：幹事専用管理画面
+         ビュー3：イベント詳細・幹事管理画面
     ===================================== -->
     <section id="view-admin" class="hidden">
+      <div class="sub-nav-row">
+        <button type="button" id="btn-admin-back-home" class="btn btn-secondary btn-sm">← イベント一覧に戻る</button>
+      </div>
+
       <div class="card admin-hero">
         <div class="hero-badges">
-          <span class="badge badge-admin">幹事専用ページ</span>
+          <span class="badge badge-admin">幹事詳細ページ</span>
           <span id="admin-status-badge" class="badge"></span>
         </div>
         <h1 id="admin-title" class="event-title"></h1>
         <div class="meta-grid" id="admin-meta"></div>
         <div id="admin-note-box" class="event-note hidden"></div>
+      </div>
 
-        <div class="admin-share-box">
-          <button type="button" id="btn-admin-line-share" class="btn btn-line btn-lg btn-block">
-            LINEでフレンドに追加送信する
-          </button>
-          <div class="share-sub-btns">
-            <button type="button" id="btn-copy-guest-url" class="btn btn-secondary btn-sm">招待URLコピー</button>
-            <button type="button" id="btn-copy-admin-url" class="btn btn-secondary btn-sm">幹事URLコピー</button>
-            <button type="button" id="btn-open-guest-preview" class="btn btn-secondary btn-sm">招待画面を見る</button>
-          </div>
+      <!-- LINE招待送信 ＆ 送信済み把握（誤送信防止） -->
+      <div class="card invite-manage-card">
+        <div class="card-head-row">
+          <h2 class="section-title">LINEで招待を送る（誤送信防止）</h2>
+          <span id="invited-memo-count" class="badge">送信済 0名</span>
         </div>
+        <p class="muted-text">送る相手の名前を入れてから送信すると送信日時が自動記録され、重複送信を警告します（LIFF時は回答ボタン付きカードで送信されます）。</p>
+
+        <div class="form-group">
+          <label for="invite-target-names">これから招待を送る相手（複数なら「、」区切り／空欄のまま送信も可）</label>
+          <input type="text" id="invite-target-names" placeholder="例：佐藤、田中" />
+          <div id="friend-history-chips" class="quick-chips location-chips hidden"></div>
+        </div>
+
+        <div class="invite-send-actions">
+          <button type="button" id="btn-admin-line-share" class="btn btn-line btn-lg">
+            記録してLINEで招待を送る
+          </button>
+          <button type="button" id="btn-invite-record-only" class="btn btn-secondary btn-sm">
+            送信済みに記録のみ追加
+          </button>
+        </div>
+
+        <div class="share-sub-btns">
+          <button type="button" id="btn-copy-guest-url" class="btn btn-secondary btn-sm">招待URLコピー</button>
+          <button type="button" id="btn-copy-admin-url" class="btn btn-secondary btn-sm">幹事URLコピー</button>
+          <button type="button" id="btn-open-guest-preview" class="btn btn-secondary btn-sm">招待画面を見る</button>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="sent-list-head">
+          <strong>招待URLを送信済みのフレンド一覧</strong>
+          <span class="muted-inline">※回答一覧の名前と自動照合します</span>
+        </div>
+        <div id="invited-memo-list" class="invited-memo-list"></div>
       </div>
 
       <!-- 出欠一覧（幹事限定） -->
       <div class="card">
         <div class="card-head-row">
           <h2 class="section-title">出欠一覧（幹事限定）</h2>
-          <button type="button" id="btn-admin-refresh" class="btn btn-sm btn-secondary">更新</button>
+          <button type="button" id="btn-admin-refresh" class="btn btn-sm btn-secondary">最新に更新</button>
         </div>
         <div id="admin-summary-area"></div>
         <div id="admin-responses-area"></div>
@@ -239,7 +360,7 @@
       <!-- 開催確定＆集合案内（ワンタップLINE送信） -->
       <div class="card confirm-card" id="admin-confirm-card">
         <h2 class="section-title">開催確定＆集合案内を送る</h2>
-        <p class="muted-text">◯参加メンバーと日時・場所をまとめた確定案内文を自動作成してLINE送信できます。</p>
+        <p class="muted-text">◯参加メンバーと日時・場所をまとめた確定案内をLINE送信できます（LIFF時はカード形式で送信されます）。</p>
 
         <div id="confirm-date-wrap" class="form-group hidden">
           <label for="confirm-date-select">開催確定する日程</label>
@@ -249,7 +370,7 @@
         <div class="confirm-options">
           <label class="checkbox-label">
             <input type="checkbox" id="confirm-opt-include-maybe" />
-            <span>△保留メンバーも案内文に含める</span>
+            <span>△保留メンバーも案内に含める</span>
           </label>
           <label class="checkbox-label">
             <input type="checkbox" id="confirm-opt-include-memo" />
@@ -258,7 +379,7 @@
         </div>
 
         <div class="form-group">
-          <label for="confirm-extra-note">集合・予約メモ（任意・案内文に追記）</label>
+          <label for="confirm-extra-note">集合・予約メモ（任意・案内に追記）</label>
           <input type="text" id="confirm-extra-note" placeholder="例：〇〇の名前で予約済み／10分前に現地集合" />
         </div>
 
@@ -272,31 +393,19 @@
         </div>
 
         <div id="confirm-preview-wrap" class="confirm-preview-wrap hidden">
-          <label for="confirm-message-text">送信される文面（このまま直接編集できます）</label>
+          <label for="confirm-message-text">送信される文面（手動編集した場合はこのテキスト内容が送信されます）</label>
           <textarea id="confirm-message-text" rows="9"></textarea>
-          <button type="button" id="btn-confirm-reset" class="btn-text-muted">自動生成文面に戻す</button>
+          <button type="button" id="btn-confirm-reset" class="btn-text-muted">自動生成（カード送信）に戻す</button>
         </div>
       </div>
 
-      <!-- 声かけ済みメモ（幹事専用） -->
+      <!-- イベント編集・日時変更・受付コントロール -->
       <div class="card">
-        <h2 class="section-title">声かけ済みメモ（幹事専用）</h2>
-        <p class="muted-text">個別にLINE送信したフレンドを記録して、未返事の相手を把握できます。回答者一覧に同じ名前があると自動で「回答済」表示になります。</p>
-        <form id="invited-memo-form" class="inline-form">
-          <input type="text" id="memo-friend-name" placeholder="フレンド名（例：佐藤）" required />
-          <input type="text" id="memo-friend-note" placeholder="メモ（例：LINE済）" />
-          <button type="submit" class="btn btn-primary btn-sm">追加</button>
-        </form>
-        <div id="invited-memo-list" class="invited-memo-list"></div>
-      </div>
-
-      <!-- 受付・定員コントロール -->
-      <div class="card">
-        <h2 class="section-title">受付・定員コントロール</h2>
+        <h2 class="section-title">イベント編集・日時変更・受付管理</h2>
         <div class="control-row">
           <div>
             <strong>手動締切スイッチ</strong>
-            <p class="muted-text">ONにすると招待画面からの新規回答・変更を停止します。</p>
+            <p class="muted-text" style="margin:0;">ONにすると招待画面からの新規回答・変更を停止します。</p>
           </div>
           <label class="switch">
             <input type="checkbox" id="toggle-manual-close" />
@@ -305,6 +414,11 @@
         </div>
 
         <hr class="divider" />
+
+        <div class="form-group">
+          <label for="admin-edit-title">イベント名</label>
+          <input type="text" id="admin-edit-title" />
+        </div>
 
         <div class="control-form-grid">
           <div class="form-group">
@@ -316,6 +430,24 @@
             <input type="text" id="admin-edit-location" />
           </div>
         </div>
+
+        <!-- 開催日時・候補日の編集エリア -->
+        <div class="dates-panel" style="margin-top:8px;">
+          <div class="dates-panel-head">
+            <label id="admin-edit-dates-label">開催日時の編集</label>
+            <span class="hint-badge">既存回答を保ったまま日時変更できます</span>
+          </div>
+          <div id="admin-edit-dates-rows"></div>
+          <div id="admin-edit-dates-actions" class="date-add-actions hidden">
+            <button type="button" id="btn-admin-multi-pick" class="btn btn-primary btn-sm">
+              カレンダーから候補日を追加
+            </button>
+            <button type="button" id="btn-admin-add-date" class="btn btn-secondary btn-sm">
+              ＋ 候補を1件追加
+            </button>
+          </div>
+        </div>
+
         <div class="form-group">
           <label class="checkbox-label">
             <input type="checkbox" id="admin-edit-auto-close" />
@@ -335,14 +467,14 @@
           <textarea id="admin-edit-note" rows="2"></textarea>
         </div>
         <div class="actions-row space-between">
-          <button type="button" id="btn-admin-save-settings" class="btn btn-primary">設定を保存</button>
+          <button type="button" id="btn-admin-save-settings" class="btn btn-primary">編集内容を保存</button>
           <button type="button" id="btn-admin-delete-event" class="btn btn-danger-outline btn-sm">スプレッドシートから完全削除</button>
         </div>
       </div>
     </section>
   </main>
 
-  <!-- スマホ対応カスタムカレンダーモーダル（単日・複数連続タップ両対応） -->
+  <!-- スマホ対応カスタムカレンダーモーダル -->
   <div id="calendar-modal" class="cal-backdrop hidden" role="dialog" aria-modal="true">
     <div class="cal-sheet">
       <div class="cal-header">
