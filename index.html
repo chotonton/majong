@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>麻雀セット 出欠確認</title>
-  <link rel="stylesheet" href="style.css?v=20261127" />
+  <link rel="stylesheet" href="style.css?v=20261128v2" />
 </head>
 <body>
   <header class="app-header">
@@ -40,6 +40,11 @@
          ビュー0：トップ画面（イベント一覧ダッシュボード）
     ===================================== -->
     <section id="view-home" class="hidden">
+      <div id="dashboard-error-banner" class="card error-card hidden">
+        <strong style="display:block;margin-bottom:4px;">一覧読み込みエラー</strong>
+        <div id="dashboard-error-text" style="font-size:0.9rem;white-space:pre-wrap;"></div>
+      </div>
+
       <div class="card filter-panel">
         <div class="dashboard-head" style="margin-bottom:12px;">
           <div>
@@ -118,7 +123,6 @@
           </table>
         </div>
 
-        <!-- LINE未連携時用：別端末・過去イベントの幹事URL取り込み -->
         <details class="import-box">
           <summary>別ブラウザや過去に作ったイベントを一覧に追加する（幹事URL入力）</summary>
           <div class="import-box-body">
@@ -277,6 +281,13 @@
         </div>
         <div id="guest-status-area"></div>
         <p class="privacy-note">※参加者の名前・条件メモは幹事のみ確認できます。</p>
+      </div>
+
+      <!-- ◯参加回答済み時のみ表示：ワンタップカレンダー登録カード -->
+      <div id="guest-calendar-card" class="card calendar-reg-card hidden">
+        <h2 class="section-title">予定をカレンダーに登録する</h2>
+        <p class="muted-text">◯参加で回答した日程を、お使いのカレンダーアプリへワンタップで追加できます。</p>
+        <div id="guest-calendar-list" class="calendar-reg-list"></div>
       </div>
 
       <div class="card">
@@ -442,7 +453,6 @@
           </div>
         </div>
 
-        <!-- 開催日時・候補日の編集エリア -->
         <div class="dates-panel" style="margin-top:8px;">
           <div class="dates-panel-head">
             <label id="admin-edit-dates-label">開催日時の編集</label>
@@ -524,6 +534,6 @@
   <div id="toast" class="toast hidden"></div>
 
   <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
-  <script src="engine.js?v=20261127"></script>
+  <script src="engine.js?v=20261128v2"></script>
 </body>
 </html>

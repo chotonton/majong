@@ -1,6 +1,7 @@
 /**
- * 麻雀セット出欠管理システム - フロントエンドエンジン（総チェック修正版）
- * LINE連携前（パターンA）＆ LINE連携後（パターンB）完全両対応
+ * 麻雀セット出欠管理システム - フロントエンドエンジン（総チェック完全版）
+ * 対応GASバージョン: 2026-11-28-v2
+ * 機能：幹事＆招待一覧(POST/GETフォールバック) / フィルタ / ゲストカレンダー登録 / 日時編集 / 誤送信防止 / Flex Message対応
  */
 
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbw-yNrj1KqUzx68Ar-NhDo9FgnetpyMoGdO_zAVdiM1yYHr-KJ0pHoqSVfAsVXailO5/exec';
@@ -42,7 +43,7 @@ const calState = {
 };
 
 /* =====================================================
-   ユーティリティ（安全バインド対応）
+   ユーティリティ
 ===================================================== */
 const $ = (id) => document.getElementById(id);
 
@@ -167,6 +168,157 @@ async function copyToClipboard(text, successMsg = 'コピーしました') {
 }
 
 /* =====================================================
+   カレンダー登録（Googleカレンダー ＆ iPhone/標準 .ics）
+===================================================== */
+function toCalDateTimeToken(dt) {
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const d = String(dt.getDate()).padStart(2, '0');
+  const hh = String(dt.getHours()).padStart(2, '0');
+  const mm = String(dt.getMinutes()).padStart(2, '0');
+  return `${y}${m}${d}T${hh}${mm}00`;
+}
+
+function computeCalendarRange(dateStr, timeStr) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr || '')) return null;
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const parsed = parseTimeString(timeStr, '');
+  const sh = parsed.sh !== '' ? Number(parsed.sh) : 13;
+  const sm = parsed.sm !== '' ? Number(parsed.sm) : 0;
+
+  const startDt = new Date(y, m - 1, d, sh, sm, 0);
+  let endDt;
+
+  if (parsed.eh !== '') {
+    const eh = Number(parsed.eh);
+    const em = parsed.em !== '' ? Number(parsed.em) : 0;
+    endDt = new Date(y, m - 1, d, eh, em, 0);
+    // 徹マン等の日またぎ（終了時刻 <= 開始時刻）は翌日に自動調整
+    if (endDt.getTime() <= startDt.getTime()) {
+      endDt.setDate(endDt.getDate() + 1);
+    }
+  } else {
+    endDt = new Date(startDt.getTime() + 4 * 60 * 60 * 1000);
+  }
+
+  return {
+    startToken: toCalDateTimeToken(startDt),
+    endToken: toCalDateTimeToken(endDt)
+  };
+}
+
+function buildCalendarDetailsText(ev, myRes) {
+  const lines = [];
+  if (ev.note) lines.push(ev.note);
+  if (myRes?.condition_memo) lines.push(`自分の条件メモ：${myRes.condition_memo}`);
+  lines.push(`出欠ページ：${buildGuestUrl(ev.id)}`);
+  return lines.join('\n');
+}
+
+function buildGoogleCalendarUrl(ev, dateObj, myRes) {
+  const range = computeCalendarRange(dateObj.date, dateObj.time);
+  if (!range) return '';
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: ev.title || '麻雀セット',
+    dates: `${range.startToken}/${range.endToken}`,
+    ctz: 'Asia/Tokyo',
+    location: ev.location || '',
+    details: buildCalendarDetailsText(ev, myRes)
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+function escapeIcsText(str) {
+  return String(str || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\r?\n/g, '\\n')
+    .replace(/,/g, '\\,')
+    .replace(/;/g, '\\;');
+}
+
+function downloadIcsFile(ev, dateObj, myRes) {
+  const range = computeCalendarRange(dateObj.date, dateObj.time);
+  if (!range) {
+    showToast('日付情報が不正なためカレンダーファイルを作成できません');
+    return;
+  }
+
+  const nowStamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  const uid = `${ev.id}-${dateObj.id || 'd1'}@mahjong-set.local`;
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//MahjongSetApp//JP',
+    'CALSCALE:GREGORIAN',
+    'BEGIN:VTIMEZONE',
+    'TZID:Asia/Tokyo',
+    'BEGIN:STANDARD',
+    'DTSTART:19700101T000000',
+    'TZOFFSETFROM:+0900',
+    'TZOFFSETTO:+0900',
+    'TZNAME:JST',
+    'END:STANDARD',
+    'END:VTIMEZONE',
+    'BEGIN:VEVENT',
+    `UID:${uid}`,
+    `DTSTAMP:${nowStamp}`,
+    `DTSTART;TZID=Asia/Tokyo:${range.startToken}`,
+    `DTEND;TZID=Asia/Tokyo:${range.endToken}`,
+    `SUMMARY:${escapeIcsText(ev.title || '麻雀セット')}`,
+    `LOCATION:${escapeIcsText(ev.location || '')}`,
+    `DESCRIPTION:${escapeIcsText(buildCalendarDetailsText(ev, myRes))}`,
+    'END:VEVENT',
+    'END:VCALENDAR'
+  ];
+
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `mahjong_${dateObj.date || 'event'}.ics`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  showToast('カレンダー用ファイル(.ics)を作成しました');
+}
+
+function renderGuestCalendarCard(ev, myRes) {
+  const card = $('guest-calendar-card');
+  const listEl = $('guest-calendar-list');
+  if (!card || !listEl) return;
+
+  const okDates = myRes
+    ? (ev.dates || []).filter(d => myRes.answers?.[d.id] === 'ok' && /^\d{4}-\d{2}-\d{2}$/.test(d.date || ''))
+    : [];
+
+  if (okDates.length === 0) {
+    card.classList.add('hidden');
+    listEl.innerHTML = '';
+    return;
+  }
+
+  card.classList.remove('hidden');
+  listEl.innerHTML = '';
+
+  okDates.forEach(d => {
+    const gcalUrl = buildGoogleCalendarUrl(ev, d, myRes);
+    const item = document.createElement('div');
+    item.className = 'calendar-reg-item';
+    item.innerHTML = `
+      <div class="calendar-reg-date">◯ ${escapeHtml(formatDateLabel(d.date, d.time))}${ev.location ? ' ／ ' + escapeHtml(ev.location) : ''}</div>
+      <div class="calendar-reg-btns">
+        <a href="${gcalUrl}" target="_blank" rel="noopener" class="btn btn-gcal btn-sm">Googleカレンダーに登録</a>
+        <button type="button" class="btn btn-secondary btn-sm btn-dl-ics">iPhone / 標準カレンダー (.ics)</button>
+      </div>
+    `;
+    item.querySelector('.btn-dl-ics').addEventListener('click', () => downloadIcsFile(ev, d, myRes));
+    listEl.appendChild(item);
+  });
+}
+
+/* =====================================================
    LINE送信（ポップアップブロック対策済み ＋ Flex Message対応）
 ===================================================== */
 function safeFlexStr(str, fallback = '-') {
@@ -209,14 +361,7 @@ function buildInviteFlexBubble(ev) {
   ];
 
   if (ev.note) {
-    bodyContents.push({
-      type: 'text',
-      text: safeFlexStr(ev.note),
-      size: 'xs',
-      color: '#5d6d65',
-      wrap: true,
-      margin: 'md'
-    });
+    bodyContents.push({ type: 'text', text: safeFlexStr(ev.note), size: 'xs', color: '#5d6d65', wrap: true, margin: 'md' });
   }
 
   return {
@@ -288,12 +433,8 @@ function buildConfirmFlexMessage(info) {
   if (includeMaybe && maybeMembers.length > 0) {
     bodyContents[2].contents.push(buildFlexInfoRow(`保留(${maybeMembers.length}名)`, maybeMembers.map(formatM).join('\n')));
   }
-  if (extraNote) {
-    bodyContents[2].contents.push(buildFlexInfoRow('メモ', extraNote));
-  }
-  if (ev.note) {
-    bodyContents.push({ type: 'text', text: safeFlexStr(ev.note), size: 'xs', color: '#5d6d65', wrap: true, margin: 'md' });
-  }
+  if (extraNote) bodyContents[2].contents.push(buildFlexInfoRow('メモ', extraNote));
+  if (ev.note) bodyContents.push({ type: 'text', text: safeFlexStr(ev.note), size: 'xs', color: '#5d6d65', wrap: true, margin: 'md' });
   bodyContents.push({ type: 'text', text: '当日はよろしくお願いします！', size: 'sm', weight: 'bold', color: '#14532d', margin: 'md' });
 
   const guestUrl = buildGuestUrl(ev.id);
@@ -351,10 +492,7 @@ async function openLineShare(fallbackText, flexMessage = null) {
 
   const url = `https://line.me/R/share?text=${encodeURIComponent(fallbackText)}`;
   const opened = window.open(url, '_blank', 'noopener');
-  if (!opened) {
-    // ポップアップがブロックされた環境向けのフォールバック
-    window.location.href = url;
-  }
+  if (!opened) window.location.href = url;
 }
 
 function buildLineMessage(ev) {
@@ -380,18 +518,14 @@ function buildLineMessage(ev) {
 ===================================================== */
 function isEventFull(ev) {
   if (!ev.dates || ev.dates.length === 0) return false;
-  if (ev.mode === 'single') {
-    return (ev.counts?.[ev.dates[0].id]?.ok || 0) >= ev.capacity;
-  }
+  if (ev.mode === 'single') return (ev.counts?.[ev.dates[0].id]?.ok || 0) >= ev.capacity;
   return ev.dates.some(d => (ev.counts?.[d.id]?.ok || 0) >= ev.capacity);
 }
 
 function isEventOpen(ev) {
   if (ev.is_closed) return false;
   if (!ev.dates || ev.dates.length === 0) return true;
-  if (ev.mode === 'single') {
-    return (ev.counts?.[ev.dates[0].id]?.ok || 0) < ev.capacity;
-  }
+  if (ev.mode === 'single') return (ev.counts?.[ev.dates[0].id]?.ok || 0) < ev.capacity;
   return ev.dates.some(d => (ev.counts?.[d.id]?.ok || 0) < ev.capacity);
 }
 
@@ -871,13 +1005,23 @@ function setMyResponseId(eventId, responseId) {
 }
 
 /* =====================================================
-   GAS API 通信
+   GAS API 通信（JSON検証 ＋ エラー詳細化）
 ===================================================== */
+async function parseGasResponse(res) {
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const raw = await res.text();
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const snippet = raw.replace(/\s+/g, ' ').slice(0, 80);
+    throw new Error(`GASからJSON以外の応答が返りました（アクセス権が「全員」でない可能性があります）: ${snippet}`);
+  }
+}
+
 async function apiGet(params) {
   const qs = new URLSearchParams(params).toString();
   const res = await fetch(`${GAS_API_URL}?${qs}`, { method: 'GET', redirect: 'follow' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return await res.json();
+  return await parseGasResponse(res);
 }
 
 async function apiPost(payload) {
@@ -886,8 +1030,7 @@ async function apiPost(payload) {
     redirect: 'follow',
     body: JSON.stringify(payload)
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return await res.json();
+  return await parseGasResponse(res);
 }
 
 /* =====================================================
@@ -951,7 +1094,7 @@ function parseUrlParams() {
 }
 
 /* =====================================================
-   画面切替・初期化（エラー時フォールバック付き）
+   画面切替・初期化
 ===================================================== */
 function hideAllViews() {
   ['view-home', 'view-create', 'view-guest', 'view-admin', 'view-error'].forEach(id => {
@@ -1011,13 +1154,11 @@ function bindStaticEvents() {
     }
   });
 
-  // ホーム画面
   on('btn-home-refresh', 'click', () => loadDashboard());
   on('btn-home-create', 'click', () => openCreateView(true));
   on('btn-empty-create', 'click', () => openCreateView(true));
   on('btn-import-admin-url', 'click', handleImportAdminUrl);
 
-  // フィルタ切替
   document.querySelectorAll('#dashboard-filter-bar .filter-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       state.activeFilter = btn.dataset.filter;
@@ -1028,13 +1169,11 @@ function bindStaticEvents() {
     });
   });
 
-  // 戻るボタン
   on('btn-create-back-home', 'click', () => openHomeView(true));
   on('btn-result-go-home', 'click', () => openHomeView(true));
   on('btn-admin-back-home', 'click', () => { window.location.href = getBaseUrl(); });
   on('btn-guest-go-home', 'click', () => { window.location.href = getBaseUrl(); });
 
-  // カレンダーモーダル
   on('cal-prev', 'click', () => {
     calState.viewMonth--;
     if (calState.viewMonth < 0) { calState.viewMonth = 11; calState.viewYear--; }
@@ -1068,7 +1207,6 @@ function bindStaticEvents() {
     }
   });
 
-  // 新規作成フォーム
   document.querySelectorAll('.mode-tab').forEach(btn => {
     btn.addEventListener('click', () => setCreateMode(btn.dataset.mode));
   });
@@ -1092,11 +1230,9 @@ function bindStaticEvents() {
   on('create-form', 'submit', handleCreateSubmit);
   on('btn-batch-line-share', 'click', handleBatchLineShare);
 
-  // ゲスト画面
   on('btn-guest-refresh', 'click', () => loadEventAndRender());
   on('guest-form', 'submit', handleGuestSubmit);
 
-  // 幹事詳細画面
   on('btn-admin-refresh', 'click', () => loadEventAndRender());
   on('btn-admin-line-share', 'click', handleAdminInviteSend);
   on('btn-invite-record-only', 'click', handleInviteRecordOnly);
@@ -1105,7 +1241,6 @@ function bindStaticEvents() {
   on('btn-copy-admin-url', 'click', () => copyToClipboard(buildAdminUrl(state.currentEventId, state.currentAdminKey), '幹事用URLをコピーしました'));
   on('btn-open-guest-preview', 'click', () => window.open(buildPreviewUrl(state.currentEventId), '_blank', 'noopener'));
 
-  // 詳細画面の日時編集
   on('btn-admin-add-date', 'click', () => {
     const container = $('admin-edit-dates-rows');
     const t = getLastRowTime(container, '');
@@ -1128,7 +1263,6 @@ function bindStaticEvents() {
     });
   });
 
-  // 開催確定＆集合案内
   const onConfirmOptionChange = () => {
     state.confirmCustomEdited = false;
     refreshConfirmMessageText(true);
@@ -1235,7 +1369,37 @@ async function handleImportAdminUrl() {
   }
 }
 
+async function fetchDashboardWithFallback(bodyObj) {
+  try {
+    const res = await apiPost(bodyObj);
+    if (res && res.ok) return res;
+    throw new Error(res?.error || 'POST取得失敗');
+  } catch (postErr) {
+    // POSTが失敗した場合はGETエンドポイントへ自動フォールバック
+    try {
+      const compactPayload = JSON.stringify({
+        line_uid: bodyObj.line_uid,
+        local_items: (bodyObj.local_items || []).slice(0, 25),
+        invited_ids: (bodyObj.invited_ids || []).slice(0, 25),
+        my_response_map: bodyObj.my_response_map || {}
+      });
+      const getRes = await apiGet({
+        action: 'list_admin_dashboard',
+        payload: compactPayload
+      });
+      if (getRes && getRes.ok) return getRes;
+      throw new Error(getRes?.error || 'GET取得失敗');
+    } catch (getErr) {
+      throw new Error(`POST: ${postErr.message} / GET: ${getErr.message}`);
+    }
+  }
+}
+
 async function loadDashboard() {
+  const errBanner = $('dashboard-error-banner');
+  const errText = $('dashboard-error-text');
+  if (errBanner) errBanner.classList.add('hidden');
+
   const localEvents = loadLocalMyEvents();
   const localItems = localEvents.map(e => ({ id: e.id, admin_key: e.admin_key }));
   const invitedIds = loadInvitedEventIds();
@@ -1250,14 +1414,13 @@ async function loadDashboard() {
 
   showLoading('イベント一覧を取得中...');
   try {
-    const res = await apiPost({
+    const res = await fetchDashboardWithFallback({
       action: 'list_admin_dashboard',
       line_uid: state.lineProfile?.userId || '',
       local_items: localItems,
       invited_ids: invitedIds,
       my_response_map: myResponseMap
     });
-    if (!res.ok) throw new Error(res.error || '一覧の取得に失敗しました');
 
     if (Array.isArray(res.missing_ids) && res.missing_ids.length > 0) {
       const missingSet = new Set(res.missing_ids);
@@ -1272,7 +1435,10 @@ async function loadDashboard() {
     state.invitedEvents = Array.isArray(res.invited_events) ? res.invited_events : [];
     renderDashboardAll();
   } catch (err) {
-    alert('一覧読み込みエラー: ' + err.message + '\n\n※Code.gsを「新バージョン」で再デプロイ済みかご確認ください。');
+    if (errBanner && errText) {
+      errText.textContent = `詳細：${err.message}`;
+      errBanner.classList.remove('hidden');
+    }
     renderDashboardAll();
   } finally {
     hideLoading();
@@ -1967,6 +2133,8 @@ function renderGuestView(data) {
     }).join('');
   }
 
+  renderGuestCalendarCard(ev, myRes);
+
   state.guestAnswers = {};
   if (myRes) {
     $('guest-name').value = myRes.name;
@@ -2048,6 +2216,8 @@ async function handleGuestSubmit(e) {
     if (!state.guestAnswers[d.id]) { showToast('すべての日程で ◯ / △ / ✕ を選択してください'); return; }
   }
 
+  const hasOk = Object.values(state.guestAnswers).includes('ok');
+
   showLoading('回答を送信中...');
   try {
     const existingRid = getMyResponseId(ev.id);
@@ -2072,6 +2242,13 @@ async function handleGuestSubmit(e) {
     if (!state.forcePreview) addInvitedEventHistory(ev.id);
     showToast('回答を送信しました！');
     await loadEventAndRender();
+
+    if (hasOk) {
+      const calCard = $('guest-calendar-card');
+      if (calCard && !calCard.classList.contains('hidden')) {
+        calCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
   } catch (err) {
     alert('送信エラー: ' + err.message);
   } finally {
@@ -2175,7 +2352,7 @@ function addAdminEditDateRow(dateObj, isMulti, overrideTime = null) {
 }
 
 /* =====================================================
-   LINE招待送信 ＆ 誤送信防止管理（ポップアップブロック回避）
+   LINE招待送信 ＆ 誤送信防止管理
 ===================================================== */
 function recordInviteTargets(names, openShareAfter) {
   if (!state.eventData) return;
@@ -2212,7 +2389,6 @@ function recordInviteTargets(names, openShareAfter) {
       }
     });
     $('invite-target-names').value = '';
-    // 非同期で裏側保存を開始（LINE画面起動をブロックしない）
     persistInvitedMemo(!openShareAfter);
   }
 
