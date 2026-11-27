@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>麻雀セット 出欠確認</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=20261127" />
 </head>
 <body>
   <header class="app-header">
@@ -21,7 +21,7 @@
   </header>
 
   <main class="container">
-    <!-- LINEログイン状態バー -->
+    <!-- LINEログイン状態バー（LIFF設定時のみ表示） -->
     <div id="line-status-bar" class="line-status-bar hidden">
       <span id="line-status-text"></span>
       <button type="button" id="btn-line-login" class="btn btn-line btn-sm hidden">LINEログイン</button>
@@ -30,7 +30,7 @@
     <!-- エラー表示ビュー -->
     <section id="view-error" class="card error-card hidden">
       <h2>読み込みエラー</h2>
-      <p id="error-message"></p>
+      <p id="error-message" style="white-space:pre-wrap;"></p>
       <div class="actions-row">
         <a href="?" class="btn btn-primary">イベント一覧へ戻る</a>
       </div>
@@ -40,7 +40,6 @@
          ビュー0：トップ画面（イベント一覧ダッシュボード）
     ===================================== -->
     <section id="view-home" class="hidden">
-      <!-- 共通ヘッダ＆フィルタバー -->
       <div class="card filter-panel">
         <div class="dashboard-head" style="margin-bottom:12px;">
           <div>
@@ -61,7 +60,7 @@
         </div>
       </div>
 
-      <!-- 招待されているイベント一覧（ゲスト用：人数と自分の回答状況のみ表示） -->
+      <!-- 招待されているイベント一覧 -->
       <div id="home-invited-card" class="card dashboard-card invited-card hidden">
         <div class="card-head-row">
           <h2 class="section-title">招待されているイベント</h2>
@@ -88,7 +87,7 @@
         </div>
       </div>
 
-      <!-- 自分が立てたイベント一覧（幹事用：人数・参加者名・詳細ボタン） -->
+      <!-- 自分が立てたイベント一覧（幹事用） -->
       <div id="home-admin-card" class="card dashboard-card">
         <div class="card-head-row">
           <h2 class="section-title">自分が立てたイベント（幹事）</h2>
@@ -96,8 +95,8 @@
         </div>
 
         <div id="dashboard-empty" class="empty-box hidden">
-          <p class="empty-title">自分が立てたイベントはまだありません</p>
-          <p class="muted-text">下のボタンから麻雀セットのイベントを作成してください。</p>
+          <p class="empty-title">このブラウザで管理しているイベントはまだありません</p>
+          <p class="muted-text">「イベントを新規作成」から作成すると、ここに一覧表示されます。（※LINE連携前は作成した同じブラウザごとに管理されます）</p>
           <button type="button" id="btn-empty-create" class="btn btn-primary btn-lg">＋ イベントを新規作成する</button>
         </div>
 
@@ -118,6 +117,18 @@
             <tbody id="dashboard-list"></tbody>
           </table>
         </div>
+
+        <!-- LINE未連携時用：別端末・過去イベントの幹事URL取り込み -->
+        <details class="import-box">
+          <summary>別ブラウザや過去に作ったイベントを一覧に追加する（幹事URL入力）</summary>
+          <div class="import-box-body">
+            <p class="muted-text" style="margin-bottom:8px;">幹事用URL（<code>?id=...&amp;key=...</code>）を貼り付けると、この端末の一覧にも表示されます。</p>
+            <div class="import-form-row">
+              <input type="text" id="inp-import-admin-url" placeholder="https://.../?id=ev_...&key=adm_..." />
+              <button type="button" id="btn-import-admin-url" class="btn btn-secondary btn-sm">一覧に追加</button>
+            </div>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -177,7 +188,7 @@
           </div>
 
           <div class="form-group">
-            <label for="ev-notify-mode">幹事へのLINE自動通知（前日リマインド連動）</label>
+            <label for="ev-notify-mode">幹事へのLINE自動通知（LINE連携後に有効）</label>
             <select id="ev-notify-mode">
               <option value="all" selected>回答・変更があるたびに通知</option>
               <option value="full_only">満員になった時だけ通知（通数節約）</option>
@@ -234,7 +245,7 @@
           <h2 class="section-title">イベントを作成しました</h2>
           <button type="button" id="btn-result-go-home" class="btn btn-secondary btn-sm">イベント一覧へ</button>
         </div>
-        <p class="muted-text">フレンドへ招待カードを送るか、「詳細を開く」から送信先を記録しながらLINE送信できます。</p>
+        <p class="muted-text">フレンドへ招待を送るか、「詳細を開く」から送信先を記録しながらLINE送信できます。</p>
         <div id="batch-line-wrap" class="batch-line-wrap hidden">
           <button type="button" id="btn-batch-line-share" class="btn btn-line btn-block">
             作成した全日程をまとめてLINEで送る
@@ -315,7 +326,7 @@
           <h2 class="section-title">LINEで招待を送る（誤送信防止）</h2>
           <span id="invited-memo-count" class="badge">送信済 0名</span>
         </div>
-        <p class="muted-text">送る相手の名前を入れてから送信すると送信日時が自動記録され、重複送信を警告します（LIFF時は回答ボタン付きカードで送信されます）。</p>
+        <p class="muted-text">送る相手の名前を入れてから送信すると送信日時が自動記録され、重複送信を警告します。</p>
 
         <div class="form-group">
           <label for="invite-target-names">これから招待を送る相手（複数なら「、」区切り／空欄のまま送信も可）</label>
@@ -357,10 +368,10 @@
         <div id="admin-responses-area"></div>
       </div>
 
-      <!-- 開催確定＆集合案内（ワンタップLINE送信） -->
+      <!-- 開催確定＆集合案内 -->
       <div class="card confirm-card" id="admin-confirm-card">
         <h2 class="section-title">開催確定＆集合案内を送る</h2>
-        <p class="muted-text">◯参加メンバーと日時・場所をまとめた確定案内をLINE送信できます（LIFF時はカード形式で送信されます）。</p>
+        <p class="muted-text">◯参加メンバーと日時・場所をまとめた確定案内をLINE送信できます。</p>
 
         <div id="confirm-date-wrap" class="form-group hidden">
           <label for="confirm-date-select">開催確定する日程</label>
@@ -393,9 +404,9 @@
         </div>
 
         <div id="confirm-preview-wrap" class="confirm-preview-wrap hidden">
-          <label for="confirm-message-text">送信される文面（手動編集した場合はこのテキスト内容が送信されます）</label>
+          <label for="confirm-message-text">送信される文面（このまま直接編集できます）</label>
           <textarea id="confirm-message-text" rows="9"></textarea>
-          <button type="button" id="btn-confirm-reset" class="btn-text-muted">自動生成（カード送信）に戻す</button>
+          <button type="button" id="btn-confirm-reset" class="btn-text-muted">自動生成文面に戻す</button>
         </div>
       </div>
 
@@ -455,7 +466,7 @@
           </label>
         </div>
         <div class="form-group">
-          <label for="admin-edit-notify-mode">LINE自動通知設定（前日リマインド連動）</label>
+          <label for="admin-edit-notify-mode">LINE自動通知設定（LINE連携後に有効）</label>
           <select id="admin-edit-notify-mode">
             <option value="all">回答・変更があるたびに通知</option>
             <option value="full_only">満員になった時だけ通知</option>
@@ -513,6 +524,6 @@
   <div id="toast" class="toast hidden"></div>
 
   <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
-  <script src="engine.js"></script>
+  <script src="engine.js?v=20261127"></script>
 </body>
 </html>

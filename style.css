@@ -142,12 +142,7 @@ body {
 
 /* Filter Bar */
 .filter-panel { padding: 16px 18px; }
-
-.filter-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
+.filter-bar { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .filter-btn {
   border: 1px solid var(--border);
@@ -161,11 +156,7 @@ body {
   transition: all 0.15s;
 }
 
-.filter-btn.active {
-  background: var(--primary);
-  border-color: var(--primary);
-  color: #fff;
-}
+.filter-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
 
 .filter-empty-msg {
   padding: 20px 14px;
@@ -176,6 +167,30 @@ body {
   border: 1px dashed var(--border);
   border-radius: 10px;
 }
+
+/* Import Box */
+.import-box {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.import-box summary {
+  cursor: pointer;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.import-box-body { margin-top: 10px; }
+
+.import-form-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.import-form-row input { flex: 1 1 220px; }
 
 /* Dashboard Table */
 .dashboard-card { padding: 18px; }

@@ -1,6 +1,6 @@
 /**
- * 麻雀セット出欠管理システム - フロントエンドエンジン（完全版）
- * 幹事＆招待イベント一覧 / フィルタ / 詳細日時編集 / Flex Message送信 / 誤送信防止
+ * 麻雀セット出欠管理システム - フロントエンドエンジン（総チェック修正版）
+ * LINE連携前（パターンA）＆ LINE連携後（パターンB）完全両対応
  */
 
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbw-yNrj1KqUzx68Ar-NhDo9FgnetpyMoGdO_zAVdiM1yYHr-KJ0pHoqSVfAsVXailO5/exec';
@@ -18,7 +18,7 @@ const state = {
   lastCreated: [],
   dashboardEvents: [],
   invitedEvents: [],
-  activeFilter: 'all', // 'all' | 'open' | 'full' | 'closed'
+  activeFilter: 'all',
   currentEventId: null,
   currentAdminKey: null,
   forcePreview: false,
@@ -42,9 +42,14 @@ const calState = {
 };
 
 /* =====================================================
-   ユーティリティ
+   ユーティリティ（安全バインド対応）
 ===================================================== */
 const $ = (id) => document.getElementById(id);
+
+function on(id, eventName, handler) {
+  const el = $(id);
+  if (el) el.addEventListener(eventName, handler);
+}
 
 function escapeHtml(str) {
   return String(str || '')
@@ -125,17 +130,21 @@ function getTodayStr(offsetDays = 0) {
 }
 
 function showLoading(text = '通信中...') {
-  $('loading-text').textContent = text;
-  $('loading-overlay').classList.remove('hidden');
+  const txt = $('loading-text');
+  const ov = $('loading-overlay');
+  if (txt) txt.textContent = text;
+  if (ov) ov.classList.remove('hidden');
 }
 
 function hideLoading() {
-  $('loading-overlay').classList.add('hidden');
+  const ov = $('loading-overlay');
+  if (ov) ov.classList.add('hidden');
 }
 
 let toastTimer = null;
 function showToast(msg) {
   const el = $('toast');
+  if (!el) return;
   el.textContent = msg;
   el.classList.remove('hidden');
   clearTimeout(toastTimer);
@@ -158,7 +167,7 @@ async function copyToClipboard(text, successMsg = 'コピーしました') {
 }
 
 /* =====================================================
-   LINE送信（Flex Messageカード優先 ＋ テキスト自動フォールバック）
+   LINE送信（ポップアップブロック対策済み ＋ Flex Message対応）
 ===================================================== */
 function safeFlexStr(str, fallback = '-') {
   const s = String(str || '').trim();
@@ -217,31 +226,19 @@ function buildInviteFlexBubble(ev) {
       layout: 'vertical',
       backgroundColor: '#14532d',
       paddingAll: '12px',
-      contents: [
-        { type: 'text', text: '麻雀セットのお誘い', color: '#ffffff', weight: 'bold', size: 'sm' }
-      ]
+      contents: [{ type: 'text', text: '麻雀セットのお誘い', color: '#ffffff', weight: 'bold', size: 'sm' }]
     },
-    body: {
-      type: 'box',
-      layout: 'vertical',
-      contents: bodyContents
-    },
+    body: { type: 'box', layout: 'vertical', contents: bodyContents },
     footer: {
       type: 'box',
       layout: 'vertical',
       spacing: 'sm',
-      contents: [
-        {
-          type: 'button',
-          style: 'primary',
-          color: '#06c755',
-          action: {
-            type: 'uri',
-            label: '出欠を回答する',
-            uri: guestUrl
-          }
-        }
-      ]
+      contents: [{
+        type: 'button',
+        style: 'primary',
+        color: '#06c755',
+        action: { type: 'uri', label: '出欠を回答する', uri: guestUrl }
+      }]
     }
   };
 }
@@ -262,14 +259,12 @@ function buildBatchInviteFlexMessage(eventsList) {
   return {
     type: 'flex',
     altText: `【麻雀セット日程のお誘い】全${eventsList.length}日程`,
-    contents: {
-      type: 'carousel',
-      contents: eventsList.map(ev => buildInviteFlexBubble(ev))
-    }
+    contents: { type: 'carousel', contents: eventsList.map(ev => buildInviteFlexBubble(ev)) }
   };
 }
 
 function buildConfirmFlexMessage(info) {
+  if (!info || !info.targetDate) return null;
   const { ev, targetDate, okMembers, maybeMembers, includeMaybe, includeMemo, extraNote } = info;
   const formatM = (r) => includeMemo && r.condition_memo ? `・${r.name}（${r.condition_memo}）` : `・${r.name}`;
   const memberText = okMembers.length > 0 ? okMembers.map(formatM).join('\n') : '・（まだ◯回答なし）';
@@ -309,28 +304,16 @@ function buildConfirmFlexMessage(info) {
       layout: 'vertical',
       backgroundColor: '#06c755',
       paddingAll: '12px',
-      contents: [
-        { type: 'text', text: '開催確定＆集合案内', color: '#ffffff', weight: 'bold', size: 'sm' }
-      ]
+      contents: [{ type: 'text', text: '開催確定＆集合案内', color: '#ffffff', weight: 'bold', size: 'sm' }]
     },
-    body: {
-      type: 'box',
-      layout: 'vertical',
-      contents: bodyContents
-    }
+    body: { type: 'box', layout: 'vertical', contents: bodyContents }
   };
 
   if (/^https:\/\//.test(guestUrl)) {
     bubble.footer = {
       type: 'box',
       layout: 'vertical',
-      contents: [
-        {
-          type: 'button',
-          style: 'secondary',
-          action: { type: 'uri', label: 'イベント詳細を見る', uri: guestUrl }
-        }
-      ]
+      contents: [{ type: 'button', style: 'secondary', action: { type: 'uri', label: 'イベント詳細を見る', uri: guestUrl } }]
     };
   }
 
@@ -365,13 +348,18 @@ async function openLineShare(fallbackText, flexMessage = null) {
       console.warn('ShareTargetPicker失敗、URL共有へ切替:', e);
     }
   }
+
   const url = `https://line.me/R/share?text=${encodeURIComponent(fallbackText)}`;
-  window.open(url, '_blank', 'noopener');
+  const opened = window.open(url, '_blank', 'noopener');
+  if (!opened) {
+    // ポップアップがブロックされた環境向けのフォールバック
+    window.location.href = url;
+  }
 }
 
 function buildLineMessage(ev) {
   const guestUrl = buildGuestUrl(ev.id);
-  const lines = [`【麻雀セットのお誘い】`, `${ev.title}`];
+  const lines = ['【麻雀セットのお誘い】', `${ev.title}`];
 
   if (ev.mode === 'single' && ev.dates && ev.dates[0]) {
     lines.push(`日時：${formatDateLabel(ev.dates[0].date, ev.dates[0].time)}`);
@@ -388,7 +376,7 @@ function buildLineMessage(ev) {
 }
 
 /* =====================================================
-   イベント状態判定（フィルタ用：募集中 / 満員 / 締切）
+   イベント状態判定（フィルタ用）
 ===================================================== */
 function isEventFull(ev) {
   if (!ev.dates || ev.dates.length === 0) return false;
@@ -534,16 +522,17 @@ function renderLocationHistoryChips() {
 function setupConfirmSection(ev, counts) {
   const dateWrap = $('confirm-date-wrap');
   const dateSelect = $('confirm-date-select');
+  const dates = Array.isArray(ev.dates) ? ev.dates : [];
 
-  if (ev.mode === 'multi' && ev.dates.length > 1) {
+  if (ev.mode === 'multi' && dates.length > 1) {
     dateWrap.classList.remove('hidden');
-    let bestId = ev.dates[0].id;
+    let bestId = dates[0].id;
     let bestOk = -1;
-    ev.dates.forEach(d => {
+    dates.forEach(d => {
       const okCnt = counts[d.id]?.ok || 0;
       if (okCnt > bestOk) { bestOk = okCnt; bestId = d.id; }
     });
-    dateSelect.innerHTML = ev.dates.map(d => {
+    dateSelect.innerHTML = dates.map(d => {
       const c = counts[d.id] || { ok: 0, maybe: 0 };
       const label = `${formatDateLabel(d.date, d.time)}（◯${c.ok}名 / △${c.maybe}名）`;
       return `<option value="${escapeHtml(d.id)}" ${d.id === bestId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
@@ -560,10 +549,13 @@ function setupConfirmSection(ev, counts) {
 function getConfirmContext() {
   if (!state.eventData) return null;
   const { event: ev, responses = [] } = state.eventData;
-  let targetDate = ev.dates[0];
-  if (ev.mode === 'multi' && ev.dates.length > 1) {
+  const dates = Array.isArray(ev.dates) ? ev.dates : [];
+  if (dates.length === 0) return null;
+
+  let targetDate = dates[0];
+  if (ev.mode === 'multi' && dates.length > 1) {
     const selectedId = $('confirm-date-select').value;
-    targetDate = ev.dates.find(d => d.id === selectedId) || ev.dates[0];
+    targetDate = dates.find(d => d.id === selectedId) || dates[0];
   }
   const dId = targetDate.id;
   return {
@@ -806,7 +798,10 @@ function readTimeFromRow(rowEl) {
    ローカルストレージ操作（幹事履歴 ＆ 招待履歴）
 ===================================================== */
 function loadLocalMyEvents() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_MY_EVENTS) || '[]'); } catch { return []; }
+  try {
+    const arr = JSON.parse(localStorage.getItem(STORAGE_MY_EVENTS) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
 }
 
 function saveLocalMyEvents(list) {
@@ -857,7 +852,10 @@ function removeInvitedEventHistory(eventId) {
 }
 
 function loadMyResponseMap() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_MY_RESPONSES) || '{}'); } catch { return {}; }
+  try {
+    const obj = JSON.parse(localStorage.getItem(STORAGE_MY_RESPONSES) || '{}');
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch { return {}; }
 }
 
 function getMyResponseId(eventId) {
@@ -953,50 +951,59 @@ function parseUrlParams() {
 }
 
 /* =====================================================
-   画面切替・初期化
+   画面切替・初期化（エラー時フォールバック付き）
 ===================================================== */
 function hideAllViews() {
-  $('view-home').classList.add('hidden');
-  $('view-create').classList.add('hidden');
-  $('view-guest').classList.add('hidden');
-  $('view-admin').classList.add('hidden');
-  $('view-error').classList.add('hidden');
+  ['view-home', 'view-create', 'view-guest', 'view-admin', 'view-error'].forEach(id => {
+    const el = $(id);
+    if (el) el.classList.add('hidden');
+  });
 }
 
 function setHeaderButtons(mode) {
-  $('btn-go-home').classList.toggle('hidden', mode === 'home');
-  $('btn-go-create').classList.toggle('hidden', mode === 'create');
+  const homeBtn = $('btn-go-home');
+  const createBtn = $('btn-go-create');
+  if (homeBtn) homeBtn.classList.toggle('hidden', mode === 'home');
+  if (createBtn) createBtn.classList.toggle('hidden', mode === 'create');
 }
 
 function showErrorView(msg) {
   hideAllViews();
   setHeaderButtons('error');
-  $('error-message').textContent = msg;
-  $('view-error').classList.remove('hidden');
+  const errEl = $('error-message');
+  const viewEl = $('view-error');
+  if (errEl) errEl.textContent = msg;
+  if (viewEl) viewEl.classList.remove('hidden');
 }
 
 async function init() {
-  bindStaticEvents();
-  showLoading('読み込み中...');
-  await initLiffIfAvailable();
-  hideLoading();
+  try {
+    bindStaticEvents();
+    showLoading('読み込み中...');
+    await initLiffIfAvailable();
+    hideLoading();
 
-  const { id, key, preview, view } = parseUrlParams();
-  if (id) {
-    state.currentEventId = id;
-    state.currentAdminKey = key;
-    state.forcePreview = preview;
-    await loadEventAndRender();
-  } else if (view === 'create') {
-    openCreateView(false);
-  } else {
-    await openHomeView(false);
+    const { id, key, preview, view } = parseUrlParams();
+    if (id) {
+      state.currentEventId = id;
+      state.currentAdminKey = key;
+      state.forcePreview = preview;
+      await loadEventAndRender();
+    } else if (view === 'create') {
+      openCreateView(false);
+    } else {
+      await openHomeView(false);
+    }
+  } catch (err) {
+    hideLoading();
+    console.error('初期化エラー:', err);
+    showErrorView(`画面の初期化に失敗しました。\n詳細: ${err.message}\n\n※ブラウザの強制再読み込み（Ctrl+Shift+R）をお試しください。`);
   }
 }
 
 function bindStaticEvents() {
-  $('btn-go-home').addEventListener('click', () => { window.location.href = getBaseUrl(); });
-  $('btn-go-create').addEventListener('click', () => {
+  on('btn-go-home', 'click', () => { window.location.href = getBaseUrl(); });
+  on('btn-go-create', 'click', () => {
     if (state.currentEventId) {
       window.location.href = `${getBaseUrl()}?view=create`;
     } else {
@@ -1005,9 +1012,10 @@ function bindStaticEvents() {
   });
 
   // ホーム画面
-  $('btn-home-refresh').addEventListener('click', () => loadDashboard());
-  $('btn-home-create').addEventListener('click', () => openCreateView(true));
-  $('btn-empty-create').addEventListener('click', () => openCreateView(true));
+  on('btn-home-refresh', 'click', () => loadDashboard());
+  on('btn-home-create', 'click', () => openCreateView(true));
+  on('btn-empty-create', 'click', () => openCreateView(true));
+  on('btn-import-admin-url', 'click', handleImportAdminUrl);
 
   // フィルタ切替
   document.querySelectorAll('#dashboard-filter-bar .filter-btn').forEach(btn => {
@@ -1021,98 +1029,89 @@ function bindStaticEvents() {
   });
 
   // 戻るボタン
-  $('btn-create-back-home').addEventListener('click', () => openHomeView(true));
-  $('btn-result-go-home').addEventListener('click', () => openHomeView(true));
-  $('btn-admin-back-home').addEventListener('click', () => { window.location.href = getBaseUrl(); });
-  $('btn-guest-go-home').addEventListener('click', () => { window.location.href = getBaseUrl(); });
+  on('btn-create-back-home', 'click', () => openHomeView(true));
+  on('btn-result-go-home', 'click', () => openHomeView(true));
+  on('btn-admin-back-home', 'click', () => { window.location.href = getBaseUrl(); });
+  on('btn-guest-go-home', 'click', () => { window.location.href = getBaseUrl(); });
 
   // カレンダーモーダル
-  $('cal-prev').addEventListener('click', () => {
+  on('cal-prev', 'click', () => {
     calState.viewMonth--;
     if (calState.viewMonth < 0) { calState.viewMonth = 11; calState.viewYear--; }
     renderCalendarGrid();
   });
-  $('cal-next').addEventListener('click', () => {
+  on('cal-next', 'click', () => {
     calState.viewMonth++;
     if (calState.viewMonth > 11) { calState.viewMonth = 0; calState.viewYear++; }
     renderCalendarGrid();
   });
-  $('cal-today').addEventListener('click', () => {
+  on('cal-today', 'click', () => {
     const now = new Date();
     calState.viewYear = now.getFullYear();
     calState.viewMonth = now.getMonth();
     renderCalendarGrid();
   });
-  $('cal-confirm-multi').addEventListener('click', () => {
+  on('cal-confirm-multi', 'click', () => {
     if (typeof calState.onConfirmMulti === 'function') {
       calState.onConfirmMulti(Array.from(calState.selectedSet).sort());
     }
     closeCalendarModal();
   });
-  $('cal-close').addEventListener('click', closeCalendarModal);
-  $('calendar-modal').addEventListener('click', (e) => {
+  on('cal-close', 'click', closeCalendarModal);
+  on('calendar-modal', 'click', (e) => {
     if (e.target === $('calendar-modal')) closeCalendarModal();
   });
 
-  const loginBtn = $('btn-line-login');
-  if (loginBtn) {
-    loginBtn.addEventListener('click', () => {
-      if (state.liffReady && typeof liff !== 'undefined') {
-        liff.login({ redirectUri: window.location.href });
-      }
-    });
-  }
+  on('btn-line-login', 'click', () => {
+    if (state.liffReady && typeof liff !== 'undefined') {
+      liff.login({ redirectUri: window.location.href });
+    }
+  });
 
   // 新規作成フォーム
   document.querySelectorAll('.mode-tab').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.mode-tab').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      state.createMode = btn.dataset.mode;
-      $('single-dates-area').classList.toggle('hidden', state.createMode !== 'single');
-      $('multi-dates-area').classList.toggle('hidden', state.createMode !== 'multi');
-    });
+    btn.addEventListener('click', () => setCreateMode(btn.dataset.mode));
   });
 
   document.querySelectorAll('.cap-chip').forEach(chip => {
     chip.addEventListener('click', () => { $('ev-capacity').value = chip.dataset.cap; });
   });
 
-  $('btn-add-single-row').addEventListener('click', () => {
+  on('btn-add-single-row', 'click', () => {
     const t = getLastRowTime($('single-rows'), '19');
     addSingleDateRow('', t.sh, t.sm, t.eh, t.em);
   });
-  $('btn-multi-pick-single').addEventListener('click', () => openMultiPickForContainer('single'));
+  on('btn-multi-pick-single', 'click', () => openMultiPickForContainer('single'));
 
-  $('btn-add-multi-row').addEventListener('click', () => {
+  on('btn-add-multi-row', 'click', () => {
     const t = getLastRowTime($('multi-rows'), '');
     addMultiDateRow('', t.sh, t.sm, t.eh, t.em);
   });
-  $('btn-multi-pick-multi').addEventListener('click', () => openMultiPickForContainer('multi'));
+  on('btn-multi-pick-multi', 'click', () => openMultiPickForContainer('multi'));
 
-  $('create-form').addEventListener('submit', handleCreateSubmit);
-  $('btn-batch-line-share').addEventListener('click', handleBatchLineShare);
+  on('create-form', 'submit', handleCreateSubmit);
+  on('btn-batch-line-share', 'click', handleBatchLineShare);
 
   // ゲスト画面
-  $('btn-guest-refresh').addEventListener('click', () => loadEventAndRender());
-  $('guest-form').addEventListener('submit', handleGuestSubmit);
+  on('btn-guest-refresh', 'click', () => loadEventAndRender());
+  on('guest-form', 'submit', handleGuestSubmit);
 
   // 幹事詳細画面
-  $('btn-admin-refresh').addEventListener('click', () => loadEventAndRender());
-  $('btn-admin-line-share').addEventListener('click', handleAdminInviteSend);
-  $('btn-invite-record-only').addEventListener('click', handleInviteRecordOnly);
+  on('btn-admin-refresh', 'click', () => loadEventAndRender());
+  on('btn-admin-line-share', 'click', handleAdminInviteSend);
+  on('btn-invite-record-only', 'click', handleInviteRecordOnly);
 
-  $('btn-copy-guest-url').addEventListener('click', () => copyToClipboard(buildGuestUrl(state.currentEventId), '招待用URLをコピーしました'));
-  $('btn-copy-admin-url').addEventListener('click', () => copyToClipboard(buildAdminUrl(state.currentEventId, state.currentAdminKey), '幹事用URLをコピーしました'));
-  $('btn-open-guest-preview').addEventListener('click', () => window.open(buildPreviewUrl(state.currentEventId), '_blank', 'noopener'));
+  on('btn-copy-guest-url', 'click', () => copyToClipboard(buildGuestUrl(state.currentEventId), '招待用URLをコピーしました'));
+  on('btn-copy-admin-url', 'click', () => copyToClipboard(buildAdminUrl(state.currentEventId, state.currentAdminKey), '幹事用URLをコピーしました'));
+  on('btn-open-guest-preview', 'click', () => window.open(buildPreviewUrl(state.currentEventId), '_blank', 'noopener'));
 
-  // 詳細画面の日時編集（複数候補日モード時の追加ボタン）
-  $('btn-admin-add-date').addEventListener('click', () => {
+  // 詳細画面の日時編集
+  on('btn-admin-add-date', 'click', () => {
     const container = $('admin-edit-dates-rows');
     const t = getLastRowTime(container, '');
     addAdminEditDateRow({ id: '', date: getTodayStr(container.children.length + 1), time: '' }, true, t);
   });
-  $('btn-admin-multi-pick').addEventListener('click', () => {
+  on('btn-admin-multi-pick', 'click', () => {
     const container = $('admin-edit-dates-rows');
     const existingDates = Array.from(container.querySelectorAll('.inp-date')).map(el => el.value);
     const existingSet = new Set(existingDates);
@@ -1134,43 +1133,51 @@ function bindStaticEvents() {
     state.confirmCustomEdited = false;
     refreshConfirmMessageText(true);
   };
-  $('confirm-date-select').addEventListener('change', onConfirmOptionChange);
-  $('confirm-opt-include-maybe').addEventListener('change', onConfirmOptionChange);
-  $('confirm-opt-include-memo').addEventListener('change', onConfirmOptionChange);
-  $('confirm-extra-note').addEventListener('input', onConfirmOptionChange);
+  on('confirm-date-select', 'change', onConfirmOptionChange);
+  on('confirm-opt-include-maybe', 'change', onConfirmOptionChange);
+  on('confirm-opt-include-memo', 'change', onConfirmOptionChange);
+  on('confirm-extra-note', 'input', onConfirmOptionChange);
+  on('confirm-message-text', 'input', () => { state.confirmCustomEdited = true; });
 
-  $('confirm-message-text').addEventListener('input', () => { state.confirmCustomEdited = true; });
-
-  $('btn-confirm-preview-toggle').addEventListener('click', () => {
+  on('btn-confirm-preview-toggle', 'click', () => {
     const wrap = $('confirm-preview-wrap');
     const isHidden = wrap.classList.toggle('hidden');
     $('btn-confirm-preview-toggle').textContent = isHidden ? '文面を確認・編集' : 'プレビューを閉じる';
     if (!isHidden) refreshConfirmMessageText();
   });
 
-  $('btn-confirm-reset').addEventListener('click', () => {
+  on('btn-confirm-reset', 'click', () => {
     state.confirmCustomEdited = false;
     refreshConfirmMessageText(true);
-    showToast('自動生成（カード送信）に戻しました');
+    showToast('自動生成文面に戻しました');
   });
 
-  $('btn-confirm-line-share').addEventListener('click', () => {
+  on('btn-confirm-line-share', 'click', () => {
     const msg = getCurrentConfirmMessage();
     if (!msg) return;
     const flexMsg = !state.confirmCustomEdited ? buildConfirmFlexMessage(getConfirmContext()) : null;
     openLineShare(msg, flexMsg);
   });
 
-  $('btn-confirm-copy').addEventListener('click', () => {
+  on('btn-confirm-copy', 'click', () => {
     const msg = getCurrentConfirmMessage();
     if (msg) copyToClipboard(msg, '確定案内文をコピーしました');
   });
 
-  $('toggle-manual-close').addEventListener('change', handleManualCloseToggle);
-  $('btn-admin-save-settings').addEventListener('click', handleAdminSaveSettings);
-  $('btn-admin-delete-event').addEventListener('click', () => {
+  on('toggle-manual-close', 'change', handleManualCloseToggle);
+  on('btn-admin-save-settings', 'click', handleAdminSaveSettings);
+  on('btn-admin-delete-event', 'click', () => {
     handleDeleteEventByIds(state.currentEventId, state.currentAdminKey, state.eventData?.event?.title || '', true);
   });
+}
+
+function setCreateMode(mode) {
+  state.createMode = mode === 'multi' ? 'multi' : 'single';
+  document.querySelectorAll('.mode-tab').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === state.createMode);
+  });
+  $('single-dates-area').classList.toggle('hidden', state.createMode !== 'single');
+  $('multi-dates-area').classList.toggle('hidden', state.createMode !== 'multi');
 }
 
 /* =====================================================
@@ -1184,6 +1191,48 @@ async function openHomeView(updateHistory = false) {
   setHeaderButtons('home');
   $('view-home').classList.remove('hidden');
   await loadDashboard();
+}
+
+async function handleImportAdminUrl() {
+  const raw = ($('inp-import-admin-url')?.value || '').trim();
+  if (!raw) { showToast('幹事用URLを貼り付けてください'); return; }
+
+  let id = '';
+  let key = '';
+  try {
+    const u = new URL(raw);
+    id = u.searchParams.get('id') || '';
+    key = u.searchParams.get('key') || '';
+  } catch {
+    const qIdx = raw.indexOf('?');
+    if (qIdx !== -1) {
+      const sub = new URLSearchParams(raw.slice(qIdx + 1));
+      id = sub.get('id') || '';
+      key = sub.get('key') || '';
+    }
+  }
+
+  if (!id || !key) {
+    showToast('URLに id と key が含まれていません（幹事用URLを貼ってください）');
+    return;
+  }
+
+  showLoading('幹事URLを確認中...');
+  try {
+    const res = await apiGet({ action: 'get_event', id, key });
+    if (!res.ok || !res.is_admin) {
+      alert('このURLでは幹事権限を確認できませんでした（削除済みかURLが誤っています）。');
+      return;
+    }
+    addMyEventHistory({ ...res.event, admin_key: key });
+    $('inp-import-admin-url').value = '';
+    showToast(`「${res.event.title}」を一覧に追加しました`);
+    await loadDashboard();
+  } catch (err) {
+    alert('取り込みエラー: ' + err.message);
+  } finally {
+    hideLoading();
+  }
 }
 
 async function loadDashboard() {
@@ -1223,7 +1272,8 @@ async function loadDashboard() {
     state.invitedEvents = Array.isArray(res.invited_events) ? res.invited_events : [];
     renderDashboardAll();
   } catch (err) {
-    alert('一覧読み込みエラー: ' + err.message);
+    alert('一覧読み込みエラー: ' + err.message + '\n\n※Code.gsを「新バージョン」で再デプロイ済みかご確認ください。');
+    renderDashboardAll();
   } finally {
     hideLoading();
   }
@@ -1298,9 +1348,10 @@ function renderInvitedDashboardList() {
   filtered.forEach(ev => {
     const guestUrl = `${getBaseUrl()}?id=${encodeURIComponent(ev.id)}`;
     const tr = document.createElement('tr');
-    const dateLine = ev.mode === 'single' && ev.dates[0]
-      ? formatDateLabel(ev.dates[0].date, ev.dates[0].time)
-      : `候補日 ${ev.dates.length}日程`;
+    const dates = Array.isArray(ev.dates) ? ev.dates : [];
+    const dateLine = ev.mode === 'single' && dates[0]
+      ? formatDateLabel(dates[0].date, dates[0].time)
+      : `候補日 ${dates.length}日程`;
 
     const infoHtml = `
       <div class="hero-badges" style="margin-bottom:4px;">
@@ -1317,8 +1368,8 @@ function renderInvitedDashboardList() {
     let countHtml = '';
     let myAnsHtml = '';
 
-    if (ev.mode === 'single' && ev.dates[0]) {
-      const dId = ev.dates[0].id;
+    if (ev.mode === 'single' && dates[0]) {
+      const dId = dates[0].id;
       const c = ev.counts?.[dId] || { ok: 0, maybe: 0, ng: 0 };
       const rem = Math.max(0, ev.capacity - c.ok);
       countHtml = `
@@ -1328,24 +1379,17 @@ function renderInvitedDashboardList() {
           ${c.maybe > 0 ? `<span>保留 ${c.maybe}</span>` : ''}
         </div>
       `;
-
-      const ansKey = ev.my_answers?.[dId];
-      const m = markMap[ansKey];
-      myAnsHtml = m
-        ? `<span class="member-chip ${m.cls}">${m.text}</span>`
-        : '<span class="member-chip wait">未回答</span>';
+      const m = markMap[ev.my_answers?.[dId]];
+      myAnsHtml = m ? `<span class="member-chip ${m.cls}">${m.text}</span>` : '<span class="member-chip wait">未回答</span>';
     } else {
       countHtml = `
         <div class="dash-count-main">回答 ${ev.total_respondents}名</div>
         <div class="dash-count-sub"><span>定員 ${ev.capacity}名</span></div>
       `;
-      myAnsHtml = ev.dates.map(d => {
+      myAnsHtml = dates.map(d => {
         const c = ev.counts?.[d.id] || { ok: 0, maybe: 0 };
-        const ansKey = ev.my_answers?.[d.id];
-        const m = markMap[ansKey];
-        const chipHtml = m
-          ? `<span class="member-chip ${m.cls}">${m.text}</span>`
-          : '<span class="member-chip wait">未回答</span>';
+        const m = markMap[ev.my_answers?.[d.id]];
+        const chipHtml = m ? `<span class="member-chip ${m.cls}">${m.text}</span>` : '<span class="member-chip wait">未回答</span>';
         return `
           <div class="dash-multi-row">
             <div class="dash-multi-head">
@@ -1415,9 +1459,10 @@ function renderAdminDashboardList() {
   filtered.forEach(ev => {
     const adminUrl = buildAdminUrl(ev.id, ev.admin_key);
     const tr = document.createElement('tr');
-    const dateLine = ev.mode === 'single' && ev.dates[0]
-      ? formatDateLabel(ev.dates[0].date, ev.dates[0].time)
-      : `候補日 ${ev.dates.length}日程`;
+    const dates = Array.isArray(ev.dates) ? ev.dates : [];
+    const dateLine = ev.mode === 'single' && dates[0]
+      ? formatDateLabel(dates[0].date, dates[0].time)
+      : `候補日 ${dates.length}日程`;
 
     const infoHtml = `
       <div class="hero-badges" style="margin-bottom:4px;">
@@ -1434,8 +1479,8 @@ function renderAdminDashboardList() {
     let countHtml = '';
     let membersHtml = '';
 
-    if (ev.mode === 'single' && ev.dates[0]) {
-      const dId = ev.dates[0].id;
+    if (ev.mode === 'single' && dates[0]) {
+      const dId = dates[0].id;
       const c = ev.counts?.[dId] || { ok: 0, maybe: 0, ng: 0 };
       const m = ev.date_members?.[dId] || { ok: [], maybe: [], ng: [] };
       const rem = Math.max(0, ev.capacity - c.ok);
@@ -1456,13 +1501,13 @@ function renderAdminDashboardList() {
         ? `<div class="member-chip-list">${chips.join('')}</div>`
         : '<span class="member-none">参加者はまだいません</span>';
     } else {
-      const bestOk = ev.dates.reduce((max, d) => Math.max(max, ev.counts?.[d.id]?.ok || 0), 0);
+      const bestOk = dates.reduce((max, d) => Math.max(max, ev.counts?.[d.id]?.ok || 0), 0);
       countHtml = `
         <div class="dash-count-main">回答 ${ev.total_respondents}名</div>
         <div class="dash-count-sub"><span>最多◯ ${bestOk}/${ev.capacity}名</span></div>
       `;
 
-      membersHtml = ev.dates.map(d => {
+      membersHtml = dates.map(d => {
         const c = ev.counts?.[d.id] || { ok: 0, maybe: 0 };
         const m = ev.date_members?.[d.id] || { ok: [], maybe: [] };
         const chips = [];
@@ -1517,6 +1562,7 @@ function openCreateView(updateHistory = false) {
   $('create-form').reset();
   $('ev-capacity').value = '4';
   $('ev-auto-close').checked = true;
+  setCreateMode('single');
 
   renderLocationHistoryChips();
 
@@ -1729,9 +1775,9 @@ function renderCreatedResults(createdList) {
   createdList.forEach(ev => {
     const guestUrl = buildGuestUrl(ev.id);
     const adminUrl = buildAdminUrl(ev.id, ev.admin_key);
-    const dateDesc = ev.mode === 'single'
-      ? formatDateLabel(ev.dates[0]?.date, ev.dates[0]?.time)
-      : `候補日 ${ev.dates.length}件`;
+    const dateDesc = ev.mode === 'single' && ev.dates?.[0]
+      ? formatDateLabel(ev.dates[0].date, ev.dates[0].time)
+      : `候補日 ${(ev.dates || []).length}件`;
 
     const card = document.createElement('div');
     card.className = 'created-item';
@@ -1760,7 +1806,7 @@ function handleBatchLineShare() {
   if (!state.lastCreated.length) return;
   const lines = ['【麻雀セット日程のお誘い】', '都合の合う日程から回答お願いします！', ''];
   state.lastCreated.forEach(ev => {
-    const dt = ev.dates[0] ? formatDateLabel(ev.dates[0].date, ev.dates[0].time) : '';
+    const dt = ev.dates?.[0] ? formatDateLabel(ev.dates[0].date, ev.dates[0].time) : '';
     lines.push(`■ ${ev.title}`);
     if (dt) lines.push(`日時：${dt}`);
     if (ev.location) lines.push(`場所：${ev.location}`);
@@ -1826,7 +1872,6 @@ async function loadEventAndRender() {
       state.invitedMemo = Array.isArray(res.invited_memo) ? res.invited_memo : [];
       renderAdminView(res);
     } else {
-      // プレビューでなければ「招待されているイベント」としてローカル記憶
       if (!state.forcePreview) addInvitedEventHistory(res.event.id);
       renderGuestView(res);
     }
@@ -1841,11 +1886,12 @@ async function loadEventAndRender() {
    ビュー2：招待回答画面（ゲスト用）
 ===================================================== */
 function renderEventMeta(metaEl, noteBoxEl, ev) {
+  const dates = Array.isArray(ev.dates) ? ev.dates : [];
   const items = [];
-  if (ev.mode === 'single' && ev.dates[0]) {
-    items.push({ label: '日時', val: formatDateLabel(ev.dates[0].date, ev.dates[0].time) });
+  if (ev.mode === 'single' && dates[0]) {
+    items.push({ label: '日時', val: formatDateLabel(dates[0].date, dates[0].time) });
   } else {
-    items.push({ label: '形式', val: `複数候補日（${ev.dates.length}日程）` });
+    items.push({ label: '形式', val: `複数候補日（${dates.length}日程）` });
   }
   items.push({ label: '場所', val: ev.location || '未定（幹事へ確認）' });
   items.push({ label: '定員', val: `${ev.capacity}名` });
@@ -1872,6 +1918,8 @@ function renderGuestView(data) {
   $('view-guest').classList.remove('hidden');
 
   const { event: ev, counts, my_response: myRes } = data;
+  const dates = Array.isArray(ev.dates) ? ev.dates : [];
+
   $('guest-title').textContent = ev.title;
   renderEventMeta($('guest-meta'), $('guest-note-box'), ev);
 
@@ -1879,8 +1927,8 @@ function renderGuestView(data) {
   if (state.forcePreview) badges.push('<span class="badge badge-admin">招待画面プレビュー中</span>');
   if (ev.is_closed) {
     badges.push('<span class="badge badge-closed">受付終了</span>');
-  } else if (ev.mode === 'single') {
-    const okCnt = counts[ev.dates[0].id]?.ok || 0;
+  } else if (ev.mode === 'single' && dates[0]) {
+    const okCnt = counts[dates[0].id]?.ok || 0;
     badges.push(okCnt >= ev.capacity
       ? '<span class="badge badge-full">満員（キャンセル待ち）</span>'
       : `<span class="badge badge-open">募集中（残り${ev.capacity - okCnt}枠）</span>`);
@@ -1890,8 +1938,8 @@ function renderGuestView(data) {
   $('guest-badges').innerHTML = badges.join('');
 
   const statusArea = $('guest-status-area');
-  if (ev.mode === 'single') {
-    const dId = ev.dates[0].id;
+  if (ev.mode === 'single' && dates[0]) {
+    const dId = dates[0].id;
     const c = counts[dId] || { ok: 0, maybe: 0, ng: 0 };
     const rem = Math.max(0, ev.capacity - c.ok);
     statusArea.innerHTML = `
@@ -1902,7 +1950,7 @@ function renderGuestView(data) {
       </div>
     `;
   } else {
-    statusArea.innerHTML = ev.dates.map(d => {
+    statusArea.innerHTML = dates.map(d => {
       const c = counts[d.id] || { ok: 0, maybe: 0, ng: 0 };
       const rem = Math.max(0, ev.capacity - c.ok);
       const badgeHtml = rem === 0 ? '<span class="badge badge-full">満員</span>' : `<span class="badge badge-open">残り${rem}枠</span>`;
@@ -1953,7 +2001,7 @@ function renderGuestChoiceInputs(ev, counts, myRes) {
   const container = $('guest-answer-inputs');
   container.innerHTML = '';
 
-  ev.dates.forEach(d => {
+  (ev.dates || []).forEach(d => {
     const c = counts[d.id] || { ok: 0, maybe: 0, ng: 0 };
     const prevAns = myRes?.answers?.[d.id] || null;
     const isFullLocked = ev.auto_close && c.ok >= ev.capacity && prevAns !== 'ok';
@@ -1996,7 +2044,7 @@ async function handleGuestSubmit(e) {
   const conditionMemo = $('guest-condition-memo').value.trim();
 
   if (!name) { showToast('名前を入力してください'); return; }
-  for (const d of ev.dates) {
+  for (const d of (ev.dates || [])) {
     if (!state.guestAnswers[d.id]) { showToast('すべての日程で ◯ / △ / ✕ を選択してください'); return; }
   }
 
@@ -2040,6 +2088,7 @@ function renderAdminView(data) {
   $('view-admin').classList.remove('hidden');
 
   const { event: ev, counts, responses = [] } = data;
+  const dates = Array.isArray(ev.dates) ? ev.dates : [];
   addMyEventHistory({ ...ev, admin_key: state.currentAdminKey });
 
   $('admin-title').textContent = ev.title;
@@ -2049,7 +2098,7 @@ function renderAdminView(data) {
   if (ev.is_closed) {
     stBadge.textContent = '手動締切中';
     stBadge.className = 'badge badge-closed';
-  } else if (ev.mode === 'single' && (counts[ev.dates[0].id]?.ok || 0) >= ev.capacity) {
+  } else if (ev.mode === 'single' && dates[0] && (counts[dates[0].id]?.ok || 0) >= ev.capacity) {
     stBadge.textContent = '満員到達';
     stBadge.className = 'badge badge-full';
   } else {
@@ -2072,9 +2121,6 @@ function renderAdminView(data) {
   renderFriendHistoryChips();
 }
 
-/* =====================================================
-   詳細画面の日時・候補日編集
-===================================================== */
 function renderAdminEditDates(ev) {
   const container = $('admin-edit-dates-rows');
   const actionsWrap = $('admin-edit-dates-actions');
@@ -2085,7 +2131,10 @@ function renderAdminEditDates(ev) {
   actionsWrap.classList.toggle('hidden', !isMulti);
   container.innerHTML = '';
 
-  (ev.dates || []).forEach(d => addAdminEditDateRow(d, isMulti));
+  const dates = Array.isArray(ev.dates) && ev.dates.length > 0
+    ? ev.dates
+    : [{ id: 'd1', date: getTodayStr(1), time: '13:00〜19:00' }];
+  dates.forEach(d => addAdminEditDateRow(d, isMulti));
 }
 
 function addAdminEditDateRow(dateObj, isMulti, overrideTime = null) {
@@ -2126,9 +2175,9 @@ function addAdminEditDateRow(dateObj, isMulti, overrideTime = null) {
 }
 
 /* =====================================================
-   LINE招待送信 ＆ 誤送信防止管理
+   LINE招待送信 ＆ 誤送信防止管理（ポップアップブロック回避）
 ===================================================== */
-async function recordInviteTargets(names, openShareAfter) {
+function recordInviteTargets(names, openShareAfter) {
   if (!state.eventData) return;
 
   const duplicates = [];
@@ -2163,7 +2212,8 @@ async function recordInviteTargets(names, openShareAfter) {
       }
     });
     $('invite-target-names').value = '';
-    await persistInvitedMemo(false);
+    // 非同期で裏側保存を開始（LINE画面起動をブロックしない）
+    persistInvitedMemo(!openShareAfter);
   }
 
   if (openShareAfter) {
@@ -2172,19 +2222,19 @@ async function recordInviteTargets(names, openShareAfter) {
   }
 }
 
-async function handleAdminInviteSend() {
+function handleAdminInviteSend() {
   if (!state.eventData) return;
-  await recordInviteTargets(splitTargetNames($('invite-target-names').value), true);
+  recordInviteTargets(splitTargetNames($('invite-target-names').value), true);
 }
 
-async function handleInviteRecordOnly() {
+function handleInviteRecordOnly() {
   const names = splitTargetNames($('invite-target-names').value);
   if (names.length === 0) {
     showToast('記録するフレンド名を入力してください');
     $('invite-target-names').focus();
     return;
   }
-  await recordInviteTargets(names, false);
+  recordInviteTargets(names, false);
 }
 
 function getMemberReplyStatus(ev, responses, friendName) {
@@ -2192,13 +2242,14 @@ function getMemberReplyStatus(ev, responses, friendName) {
   const resp = responses.find(r => normalizeName(r.name) === target);
   if (!resp) return null;
 
-  if (ev.mode === 'single' && ev.dates[0]) {
-    const ans = resp.answers[ev.dates[0].id];
+  const dates = Array.isArray(ev.dates) ? ev.dates : [];
+  if (ev.mode === 'single' && dates[0]) {
+    const ans = resp.answers[dates[0].id];
     if (ans === 'ok') return { text: '◯ 参加済', cls: 'memo-status-ok' };
     if (ans === 'maybe') return { text: '△ 保留', cls: 'memo-status-maybe' };
     if (ans === 'ng') return { text: '✕ 不参加', cls: 'memo-status-ng' };
   }
-  const hasOk = ev.dates.some(d => resp.answers[d.id] === 'ok');
+  const hasOk = dates.some(d => resp.answers[d.id] === 'ok');
   return hasOk ? { text: '回答済（◯あり）', cls: 'memo-status-ok' } : { text: '回答済', cls: 'memo-status-done' };
 }
 
@@ -2230,15 +2281,15 @@ function renderInvitedMemoList(ev, responses) {
       <button type="button" class="btn-text-danger btn-del-memo">削除</button>
     `;
 
-    row.querySelector('.memo-status-badge').addEventListener('click', async () => {
+    row.querySelector('.memo-status-badge').addEventListener('click', () => {
       if (replyStatus) { showToast('回答一覧と自動照合されています'); return; }
       item.done = !item.done;
-      await persistInvitedMemo(true);
+      persistInvitedMemo(true);
     });
 
-    row.querySelector('.btn-del-memo').addEventListener('click', async () => {
+    row.querySelector('.btn-del-memo').addEventListener('click', () => {
       state.invitedMemo = state.invitedMemo.filter(m => m.id !== item.id);
-      await persistInvitedMemo(true);
+      persistInvitedMemo(true);
     });
 
     container.appendChild(row);
@@ -2261,7 +2312,7 @@ async function persistInvitedMemo(showSavedToast = true) {
     if (!res.ok) throw new Error(res.error);
     if (showSavedToast) showToast('送信済みリストを更新しました');
   } catch (err) {
-    alert('保存エラー: ' + err.message);
+    alert('送信済みリストの保存エラー: ' + err.message);
   }
 }
 
@@ -2271,9 +2322,10 @@ async function persistInvitedMemo(showSavedToast = true) {
 function renderAdminResponses(ev, counts, responses) {
   const summaryEl = $('admin-summary-area');
   const listEl = $('admin-responses-area');
+  const dates = Array.isArray(ev.dates) ? ev.dates : [];
 
-  if (ev.mode === 'single') {
-    const dId = ev.dates[0].id;
+  if (ev.mode === 'single' && dates[0]) {
+    const dId = dates[0].id;
     const c = counts[dId] || { ok: 0, maybe: 0, ng: 0 };
     const rem = Math.max(0, ev.capacity - c.ok);
 
@@ -2322,7 +2374,7 @@ function renderAdminResponses(ev, counts, responses) {
       });
     });
   } else {
-    summaryEl.innerHTML = ev.dates.map(d => {
+    summaryEl.innerHTML = dates.map(d => {
       const c = counts[d.id] || { ok: 0, maybe: 0, ng: 0 };
       const rem = Math.max(0, ev.capacity - c.ok);
       return `
@@ -2346,9 +2398,9 @@ function renderAdminResponses(ev, counts, responses) {
     const markText = { ok: '◯', maybe: '△', ng: '✕' };
     const tableWrap = document.createElement('div');
     tableWrap.className = 'table-scroll';
-    const headCols = ev.dates.map(d => `<th>${escapeHtml(formatDateLabel(d.date, d.time))}</th>`).join('');
+    const headCols = dates.map(d => `<th>${escapeHtml(formatDateLabel(d.date, d.time))}</th>`).join('');
     const bodyRows = responses.map((r, idx) => {
-      const cells = ev.dates.map(d => {
+      const cells = dates.map(d => {
         const ans = r.answers[d.id] || '';
         return `<td class="${ans ? 'mark-' + ans : ''}">${markText[ans] || '-'}</td>`;
       }).join('');
