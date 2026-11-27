@@ -1,23 +1,40 @@
 /**
- * 麻雀セット出欠管理システム - フロントエンドエンジン
- * GitHub Pages + Google Apps Script (Spreadsheet DB)
+ * 麻雀セット出欠管理システム - フロントエンドエンジン（完全版）
+ * LIFF + LINE自動通知 + 複数日連続タップカレンダー + 雀荘名履歴 + 時間プルダウン + 開催確定＆集合案内LINE送信
  */
 
-// ★GASを「ウェブアプリ」としてデプロイしたURLをここに貼り付けてください
 const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbw-yNrj1KqUzx68Ar-NhDo9FgnetpyMoGdO_zAVdiM1yYHr-KJ0pHoqSVfAsVXailO5/exec';
+const LIFF_ID = 'YOUR_LIFF_ID';
 
 const STORAGE_MY_EVENTS = 'mj_set_my_events_v1';
 const STORAGE_GUEST_NAME = 'mj_set_guest_name_v1';
 const STORAGE_MY_RESPONSES = 'mj_set_my_responses_v1';
+const STORAGE_LOCATIONS = 'mj_set_locations_v1';
 
 const state = {
-  createMode: 'single', // 'single' | 'multi'
+  createMode: 'single',
   lastCreated: [],
   currentEventId: null,
   currentAdminKey: null,
-  eventData: null,      // GET API の返却オブジェクト全体
-  guestAnswers: {},     // { d1: 'ok' | 'maybe' | 'ng' }
-  invitedMemo: []       // 幹事専用 声かけ済みメモ配列
+  forcePreview: false,
+  eventData: null,
+  guestAnswers: {},
+  invitedMemo: [],
+  liffReady: false,
+  lineProfile: null,
+  cloudMyEvents: [],
+  confirmCustomEdited: false
+};
+
+const calState = {
+  mode: 'single',
+  viewYear: 2026,
+  viewMonth: 0,
+  selectedStr: '',
+  selectedSet: new Set(),
+  existingSet: new Set(),
+  onSelect: null,
+  onConfirmMulti: null
 };
 
 /* =====================================================
@@ -34,16 +51,30 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
+function isLiffConfigured() {
+  return Boolean(LIFF_ID && !LIFF_ID.includes('YOUR_LIFF_ID'));
+}
+
 function getBaseUrl() {
   return window.location.origin + window.location.pathname;
 }
 
 function buildGuestUrl(eventId) {
+  if (isLiffConfigured()) {
+    return `https://liff.line.me/${LIFF_ID}?id=${encodeURIComponent(eventId)}`;
+  }
   return `${getBaseUrl()}?id=${encodeURIComponent(eventId)}`;
 }
 
 function buildAdminUrl(eventId, adminKey) {
-  return `${getBaseUrl()}?id=${encodeURIComponent(eventId)}&key=${encodeURIComponent(adminKey)}`;
+  if (adminKey) {
+    return `${getBaseUrl()}?id=${encodeURIComponent(eventId)}&key=${encodeURIComponent(adminKey)}`;
+  }
+  return `${getBaseUrl()}?id=${encodeURIComponent(eventId)}`;
+}
+
+function buildPreviewUrl(eventId) {
+  return `${getBaseUrl()}?id=${encodeURIComponent(eventId)}&preview=1`;
 }
 
 function formatDateLabel(dateStr, timeStr) {
@@ -57,6 +88,14 @@ function formatDateLabel(dateStr, timeStr) {
   return [datePart, timeStr].filter(Boolean).join(' ');
 }
 
+function formatDateButtonLabel(dateStr) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr || '')) return '日付を選択';
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  const w = ['日', '月', '火', '水', '木', '金', '土'][dt.getDay()];
+  return `${y}年${m}月${d}日 (${w})`;
+}
+
 function formatShortTimestamp(iso) {
   if (!iso) return '';
   const dt = new Date(iso);
@@ -66,6 +105,15 @@ function formatShortTimestamp(iso) {
   const hh = String(dt.getHours()).padStart(2, '0');
   const mm = String(dt.getMinutes()).padStart(2, '0');
   return `${m}/${d} ${hh}:${mm}`;
+}
+
+function getTodayStr(offsetDays = 0) {
+  const dt = new Date();
+  dt.setDate(dt.getDate() + offsetDays);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const d = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 function showLoading(text = '通信中...') {
@@ -101,7 +149,21 @@ async function copyToClipboard(text, successMsg = 'コピーしました') {
   }
 }
 
-function openLineShare(message) {
+async function openLineShare(message) {
+  if (
+    state.liffReady &&
+    typeof liff !== 'undefined' &&
+    liff.isApiAvailable &&
+    liff.isApiAvailable('shareTargetPicker')
+  ) {
+    try {
+      const res = await liff.shareTargetPicker([{ type: 'text', text: message }]);
+      if (res) showToast('LINEでフレンドに送信しました！');
+      return;
+    } catch (e) {
+      console.warn('ShareTargetPicker失敗、URL共有へ切替:', e);
+    }
+  }
   const url = `https://line.me/R/share?text=${encodeURIComponent(message)}`;
   window.open(url, '_blank', 'noopener');
 }
@@ -125,9 +187,345 @@ function buildLineMessage(ev) {
 }
 
 /* =====================================================
+   開催確定＆集合案内メッセージ生成
+===================================================== */
+function setupConfirmSection(ev, counts) {
+  const dateWrap = $('confirm-date-wrap');
+  const dateSelect = $('confirm-date-select');
+
+  if (ev.mode === 'multi' && ev.dates.length > 1) {
+    dateWrap.classList.remove('hidden');
+
+    // ◯参加人数が最も多い日程を初期選択
+    let bestId = ev.dates[0].id;
+    let bestOk = -1;
+    ev.dates.forEach(d => {
+      const okCnt = counts[d.id]?.ok || 0;
+      if (okCnt > bestOk) {
+        bestOk = okCnt;
+        bestId = d.id;
+      }
+    });
+
+    dateSelect.innerHTML = ev.dates.map(d => {
+      const c = counts[d.id] || { ok: 0, maybe: 0 };
+      const label = `${formatDateLabel(d.date, d.time)}（◯${c.ok}名 / △${c.maybe}名）`;
+      return `<option value="${escapeHtml(d.id)}" ${d.id === bestId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    }).join('');
+  } else {
+    dateWrap.classList.add('hidden');
+    dateSelect.innerHTML = '';
+  }
+
+  state.confirmCustomEdited = false;
+  refreshConfirmMessageText();
+}
+
+function generateConfirmMessage() {
+  if (!state.eventData) return '';
+  const { event: ev, responses = [] } = state.eventData;
+
+  let targetDate = ev.dates[0];
+  if (ev.mode === 'multi' && ev.dates.length > 1) {
+    const selectedId = $('confirm-date-select').value;
+    targetDate = ev.dates.find(d => d.id === selectedId) || ev.dates[0];
+  }
+
+  const includeMaybe = $('confirm-opt-include-maybe').checked;
+  const includeMemo = $('confirm-opt-include-memo').checked;
+  const extraNote = $('confirm-extra-note').value.trim();
+
+  const dId = targetDate.id;
+  const okMembers = responses.filter(r => r.answers[dId] === 'ok');
+  const maybeMembers = responses.filter(r => r.answers[dId] === 'maybe');
+
+  const formatMember = (r) =>
+    includeMemo && r.condition_memo ? `・${r.name}（${r.condition_memo}）` : `・${r.name}`;
+
+  const lines = [
+    '【開催確定＆集合案内】',
+    ev.title,
+    '',
+    `■ 日時：${formatDateLabel(targetDate.date, targetDate.time)}`,
+    `■ 場所：${ev.location || '未定（別途連絡）'}`,
+    `■ 参加メンバー（${okMembers.length}名）`
+  ];
+
+  if (okMembers.length > 0) {
+    lines.push(...okMembers.map(formatMember));
+  } else {
+    lines.push('・（まだ◯回答がありません）');
+  }
+
+  if (includeMaybe && maybeMembers.length > 0) {
+    lines.push('', `■ 保留・調整中（${maybeMembers.length}名）`, ...maybeMembers.map(formatMember));
+  }
+
+  if (extraNote) {
+    lines.push('', `■ 集合・予約メモ：${extraNote}`);
+  }
+
+  if (ev.note) {
+    lines.push('', `■ イベント詳細：`, ev.note);
+  }
+
+  lines.push('', '当日はよろしくお願いします！');
+  return lines.join('\n');
+}
+
+function refreshConfirmMessageText(force = false) {
+  if (!force && state.confirmCustomEdited) return;
+  const ta = $('confirm-message-text');
+  if (ta) ta.value = generateConfirmMessage();
+}
+
+function getCurrentConfirmMessage() {
+  const ta = $('confirm-message-text');
+  if (state.confirmCustomEdited && ta && ta.value.trim()) {
+    return ta.value;
+  }
+  return generateConfirmMessage();
+}
+
+/* =====================================================
+   雀荘名（場所）履歴チップ機能
+===================================================== */
+function loadLocationHistory() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(STORAGE_LOCATIONS) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocationToHistory(loc) {
+  const cleaned = String(loc || '').trim();
+  if (!cleaned) return;
+  const list = loadLocationHistory().filter(item => item !== cleaned);
+  list.unshift(cleaned);
+  localStorage.setItem(STORAGE_LOCATIONS, JSON.stringify(list.slice(0, 10)));
+  renderLocationHistoryChips();
+}
+
+function removeLocationFromHistory(loc) {
+  const list = loadLocationHistory().filter(item => item !== loc);
+  localStorage.setItem(STORAGE_LOCATIONS, JSON.stringify(list));
+  renderLocationHistoryChips();
+}
+
+function renderLocationHistoryChips() {
+  const wrap = $('location-history-chips');
+  if (!wrap) return;
+  const list = loadLocationHistory();
+
+  if (list.length === 0) {
+    wrap.classList.add('hidden');
+    wrap.innerHTML = '';
+    return;
+  }
+
+  wrap.classList.remove('hidden');
+  wrap.innerHTML = '';
+  list.forEach(loc => {
+    const chip = document.createElement('span');
+    chip.className = 'loc-chip';
+    chip.innerHTML = `
+      <button type="button" class="loc-chip-text">${escapeHtml(loc)}</button>
+      <button type="button" class="loc-chip-del" aria-label="履歴削除">×</button>
+    `;
+    chip.querySelector('.loc-chip-text').addEventListener('click', () => {
+      $('ev-location').value = loc;
+      showToast(`場所を「${loc}」に設定しました`);
+    });
+    chip.querySelector('.loc-chip-del').addEventListener('click', () => {
+      removeLocationFromHistory(loc);
+    });
+    wrap.appendChild(chip);
+  });
+}
+
+/* =====================================================
+   カスタムカレンダー（単日変更 & 複数日連続タップ追加）
+===================================================== */
+function openCalendarSingle(currentDateStr, onSelect) {
+  const baseStr = /^\d{4}-\d{2}-\d{2}$/.test(currentDateStr || '') ? currentDateStr : getTodayStr(0);
+  const [y, m] = baseStr.split('-').map(Number);
+  calState.mode = 'single';
+  calState.viewYear = y;
+  calState.viewMonth = m - 1;
+  calState.selectedStr = baseStr;
+  calState.selectedSet = new Set();
+  calState.existingSet = new Set();
+  calState.onSelect = onSelect;
+  calState.onConfirmMulti = null;
+
+  $('cal-multi-hint').classList.add('hidden');
+  $('cal-confirm-multi').classList.add('hidden');
+  renderCalendarGrid();
+  $('calendar-modal').classList.remove('hidden');
+}
+
+function openCalendarMulti(existingDates, onConfirmMulti) {
+  const now = new Date();
+  calState.mode = 'multi';
+  calState.viewYear = now.getFullYear();
+  calState.viewMonth = now.getMonth();
+  calState.selectedStr = '';
+  calState.selectedSet = new Set();
+  calState.existingSet = new Set(existingDates || []);
+  calState.onSelect = null;
+  calState.onConfirmMulti = onConfirmMulti;
+
+  $('cal-multi-hint').classList.remove('hidden');
+  $('cal-confirm-multi').classList.remove('hidden');
+  updateMultiConfirmButton();
+  renderCalendarGrid();
+  $('calendar-modal').classList.remove('hidden');
+}
+
+function updateMultiConfirmButton() {
+  const btn = $('cal-confirm-multi');
+  const cnt = calState.selectedSet.size;
+  btn.textContent = cnt > 0 ? `選択した ${cnt} 日をまとめて追加` : '日付をタップして選択してください';
+  btn.disabled = cnt === 0;
+}
+
+function closeCalendarModal() {
+  $('calendar-modal').classList.add('hidden');
+}
+
+function renderCalendarGrid() {
+  const y = calState.viewYear;
+  const m = calState.viewMonth;
+  $('cal-month-title').textContent = `${y}年 ${m + 1}月`;
+
+  const grid = $('cal-grid');
+  grid.innerHTML = '';
+
+  const firstDay = new Date(y, m, 1).getDay();
+  const daysInMonth = new Date(y, m + 1, 0).getDate();
+  const todayStr = getTodayStr(0);
+
+  for (let i = 0; i < firstDay; i++) {
+    const empty = document.createElement('div');
+    empty.className = 'cal-empty';
+    grid.appendChild(empty);
+  }
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const mm = String(m + 1).padStart(2, '0');
+    const dd = String(d).padStart(2, '0');
+    const dateStr = `${y}-${mm}-${dd}`;
+    const dow = (firstDay + d - 1) % 7;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'cal-day';
+    btn.textContent = String(d);
+
+    if (dow === 0) btn.classList.add('sun');
+    if (dow === 6) btn.classList.add('sat');
+    if (dateStr < todayStr) btn.classList.add('past');
+    if (dateStr === todayStr) btn.classList.add('today');
+
+    if (calState.mode === 'single') {
+      if (dateStr === calState.selectedStr) btn.classList.add('selected');
+      btn.addEventListener('click', () => {
+        if (typeof calState.onSelect === 'function') calState.onSelect(dateStr);
+        closeCalendarModal();
+      });
+    } else {
+      if (calState.existingSet.has(dateStr)) btn.classList.add('already-added');
+      if (calState.selectedSet.has(dateStr)) btn.classList.add('selected');
+      btn.addEventListener('click', () => {
+        if (calState.selectedSet.has(dateStr)) {
+          calState.selectedSet.delete(dateStr);
+          btn.classList.remove('selected');
+        } else {
+          calState.selectedSet.add(dateStr);
+          btn.classList.add('selected');
+        }
+        updateMultiConfirmButton();
+      });
+    }
+
+    grid.appendChild(btn);
+  }
+}
+
+/* =====================================================
+   時間プルダウン生成（1時間＋15分刻み）
+===================================================== */
+function buildHourOptions(selectedHour, includeNone = false) {
+  let html = '';
+  if (includeNone) {
+    html += `<option value="" ${selectedHour === '' ? 'selected' : ''}>終了なし</option>`;
+  }
+  for (let h = 0; h < 24; h++) {
+    const val = String(h).padStart(2, '0');
+    html += `<option value="${val}" ${selectedHour === val ? 'selected' : ''}>${val}時</option>`;
+  }
+  return html;
+}
+
+function buildMinOptions(selectedMin) {
+  return ['00', '15', '30', '45'].map(m =>
+    `<option value="${m}" ${selectedMin === m ? 'selected' : ''}>${m}分</option>`
+  ).join('');
+}
+
+function buildTimeSelectHtml(sh = '13', sm = '00', eh = '19', em = '00') {
+  const endDisabled = eh === '' ? 'disabled' : '';
+  return `
+    <div class="time-select-row">
+      <div class="time-pair">
+        <select class="sel-start-h" aria-label="開始時">${buildHourOptions(sh, false)}</select>
+        <span class="time-colon">:</span>
+        <select class="sel-start-m" aria-label="開始分">${buildMinOptions(sm)}</select>
+      </div>
+      <span class="time-tilde">〜</span>
+      <div class="time-pair">
+        <select class="sel-end-h" aria-label="終了時">${buildHourOptions(eh, true)}</select>
+        <span class="time-colon">:</span>
+        <select class="sel-end-m" aria-label="終了分" ${endDisabled}>${buildMinOptions(em)}</select>
+      </div>
+    </div>
+  `;
+}
+
+function bindTimeSelectEvents(rowEl) {
+  const endH = rowEl.querySelector('.sel-end-h');
+  const endM = rowEl.querySelector('.sel-end-m');
+  endH.addEventListener('change', () => {
+    endM.disabled = endH.value === '';
+  });
+}
+
+function getLastRowTime(container, defaultEndH = '19') {
+  const lastRow = container.lastElementChild;
+  if (!lastRow) return { sh: '13', sm: '00', eh: defaultEndH, em: '00' };
+  return {
+    sh: lastRow.querySelector('.sel-start-h')?.value || '13',
+    sm: lastRow.querySelector('.sel-start-m')?.value || '00',
+    eh: lastRow.querySelector('.sel-end-h')?.value ?? defaultEndH,
+    em: lastRow.querySelector('.sel-end-m')?.value || '00'
+  };
+}
+
+function readTimeFromRow(rowEl) {
+  const sh = rowEl.querySelector('.sel-start-h').value;
+  const sm = rowEl.querySelector('.sel-start-m').value;
+  const eh = rowEl.querySelector('.sel-end-h').value;
+  const em = rowEl.querySelector('.sel-end-m').value;
+  const startStr = `${sh}:${sm}`;
+  return eh ? `${startStr}〜${eh}:${em}` : `${startStr}〜`;
+}
+
+/* =====================================================
    ローカルストレージ操作
 ===================================================== */
-function loadMyEvents() {
+function loadLocalMyEvents() {
   try {
     return JSON.parse(localStorage.getItem(STORAGE_MY_EVENTS) || '[]');
   } catch {
@@ -135,15 +533,15 @@ function loadMyEvents() {
   }
 }
 
-function saveMyEvents(list) {
+function saveLocalMyEvents(list) {
   localStorage.setItem(STORAGE_MY_EVENTS, JSON.stringify(list.slice(0, 50)));
 }
 
 function addMyEventHistory(item) {
-  const list = loadMyEvents().filter(e => e.id !== item.id);
+  const list = loadLocalMyEvents().filter(e => e.id !== item.id);
   list.unshift({
     id: item.id,
-    admin_key: item.admin_key,
+    admin_key: item.admin_key || '',
     mode: item.mode,
     title: item.title,
     location: item.location,
@@ -151,12 +549,12 @@ function addMyEventHistory(item) {
     dates: item.dates,
     created_at: item.created_at || new Date().toISOString()
   });
-  saveMyEvents(list);
+  saveLocalMyEvents(list);
 }
 
 function removeMyEventHistory(eventId) {
-  const list = loadMyEvents().filter(e => e.id !== eventId);
-  saveMyEvents(list);
+  saveLocalMyEvents(loadLocalMyEvents().filter(e => e.id !== eventId));
+  state.cloudMyEvents = state.cloudMyEvents.filter(e => e.id !== eventId);
 }
 
 function getMyResponseId(eventId) {
@@ -181,26 +579,84 @@ function setMyResponseId(eventId, responseId) {
 /* =====================================================
    GAS API 通信
 ===================================================== */
-function isApiConfigured() {
-  return Boolean(GAS_API_URL && !GAS_API_URL.includes('YOUR_DEPLOY_ID'));
-}
-
 async function apiGet(params) {
   const qs = new URLSearchParams(params).toString();
-  const res = await fetch(`${GAS_API_URL}?${qs}`, { method: 'GET' });
+  const res = await fetch(`${GAS_API_URL}?${qs}`, { method: 'GET', redirect: 'follow' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();
 }
 
 async function apiPost(payload) {
-  // CORSプリフライト回避のため text/plain を使用
   const res = await fetch(GAS_API_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    redirect: 'follow',
     body: JSON.stringify(payload)
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return await res.json();
+}
+
+/* =====================================================
+   LIFF 初期化 & クエリ解析
+===================================================== */
+async function initLiffIfAvailable() {
+  if (!isLiffConfigured() || typeof liff === 'undefined') return;
+
+  try {
+    await liff.init({ liffId: LIFF_ID });
+    state.liffReady = true;
+
+    if (liff.isLoggedIn()) {
+      const profile = await liff.getProfile();
+      state.lineProfile = {
+        userId: profile.userId,
+        displayName: profile.displayName
+      };
+    }
+  } catch (e) {
+    console.warn('LIFF初期化スキップ（通常ブラウザ動作）:', e);
+  }
+  updateLineStatusBar();
+}
+
+function updateLineStatusBar() {
+  const bar = $('line-status-bar');
+  const textEl = $('line-status-text');
+  const loginBtn = $('btn-line-login');
+  if (!bar) return;
+
+  if (!isLiffConfigured() || !state.liffReady) {
+    bar.classList.add('hidden');
+    return;
+  }
+
+  bar.classList.remove('hidden');
+  if (state.lineProfile) {
+    textEl.textContent = `LINE連携中：${state.lineProfile.displayName} さん（イベント同期・自動通知ON）`;
+    loginBtn.classList.add('hidden');
+  } else {
+    textEl.textContent = 'LINEログインすると作成イベントの自動同期・回答通知が使えます';
+    loginBtn.classList.remove('hidden');
+  }
+}
+
+function parseUrlParams() {
+  const params = new URLSearchParams(window.location.search);
+  let id = params.get('id') || '';
+  let key = params.get('key') || '';
+  let preview = params.get('preview') === '1';
+
+  if (!id && params.get('liff.state')) {
+    const rawState = params.get('liff.state');
+    const qIdx = rawState.indexOf('?');
+    if (qIdx !== -1) {
+      const sub = new URLSearchParams(rawState.slice(qIdx + 1));
+      id = sub.get('id') || '';
+      key = sub.get('key') || key;
+      preview = preview || sub.get('preview') === '1';
+    }
+  }
+  return { id, key, preview };
 }
 
 /* =====================================================
@@ -219,23 +675,21 @@ function showErrorView(msg) {
   $('view-error').classList.remove('hidden');
 }
 
-function init() {
+async function init() {
   bindStaticEvents();
 
-  if (!isApiConfigured()) {
-    $('setup-warning').classList.remove('hidden');
-  }
+  showLoading('読み込み中...');
+  await initLiffIfAvailable();
+  hideLoading();
 
-  const params = new URLSearchParams(window.location.search);
-  const eventId = params.get('id');
-  const adminKey = params.get('key');
-
-  if (!eventId) {
-    initCreateView();
+  const { id, key, preview } = parseUrlParams();
+  if (!id) {
+    await initCreateView();
   } else {
-    state.currentEventId = eventId;
-    state.currentAdminKey = adminKey || '';
-    loadEventAndRender();
+    state.currentEventId = id;
+    state.currentAdminKey = key;
+    state.forcePreview = preview;
+    await loadEventAndRender();
   }
 }
 
@@ -244,7 +698,50 @@ function bindStaticEvents() {
     window.location.href = getBaseUrl();
   });
 
-  // 作成モード切替
+  // カレンダーモーダル操作
+  $('cal-prev').addEventListener('click', () => {
+    calState.viewMonth--;
+    if (calState.viewMonth < 0) {
+      calState.viewMonth = 11;
+      calState.viewYear--;
+    }
+    renderCalendarGrid();
+  });
+  $('cal-next').addEventListener('click', () => {
+    calState.viewMonth++;
+    if (calState.viewMonth > 11) {
+      calState.viewMonth = 0;
+      calState.viewYear++;
+    }
+    renderCalendarGrid();
+  });
+  $('cal-today').addEventListener('click', () => {
+    const now = new Date();
+    calState.viewYear = now.getFullYear();
+    calState.viewMonth = now.getMonth();
+    renderCalendarGrid();
+  });
+  $('cal-confirm-multi').addEventListener('click', () => {
+    if (typeof calState.onConfirmMulti === 'function') {
+      const sorted = Array.from(calState.selectedSet).sort();
+      calState.onConfirmMulti(sorted);
+    }
+    closeCalendarModal();
+  });
+  $('cal-close').addEventListener('click', closeCalendarModal);
+  $('calendar-modal').addEventListener('click', (e) => {
+    if (e.target === $('calendar-modal')) closeCalendarModal();
+  });
+
+  const loginBtn = $('btn-line-login');
+  if (loginBtn) {
+    loginBtn.addEventListener('click', () => {
+      if (state.liffReady && typeof liff !== 'undefined') {
+        liff.login({ redirectUri: window.location.href });
+      }
+    });
+  }
+
   document.querySelectorAll('.mode-tab').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.mode-tab').forEach(b => b.classList.remove('active'));
@@ -255,48 +752,36 @@ function bindStaticEvents() {
     });
   });
 
-  // 定員クイックチップ
   document.querySelectorAll('.cap-chip').forEach(chip => {
     chip.addEventListener('click', () => {
       $('ev-capacity').value = chip.dataset.cap;
     });
   });
 
-  // 日程行追加
-  $('btn-add-single-row').addEventListener('click', () => addSingleDateRow());
-  $('btn-add-multi-row').addEventListener('click', () => addMultiDateRow());
+  $('btn-add-single-row').addEventListener('click', () => {
+    const t = getLastRowTime($('single-rows'), '19');
+    addSingleDateRow('', t.sh, t.sm, t.eh, t.em);
+  });
+  $('btn-multi-pick-single').addEventListener('click', () => openMultiPickForContainer('single'));
 
-  // 作成フォーム送信
+  $('btn-add-multi-row').addEventListener('click', () => {
+    const t = getLastRowTime($('multi-rows'), '');
+    addMultiDateRow('', t.sh, t.sm, t.eh, t.em);
+  });
+  $('btn-multi-pick-multi').addEventListener('click', () => openMultiPickForContainer('multi'));
+
   $('create-form').addEventListener('submit', handleCreateSubmit);
-
-  // 一括LINE送信
   $('btn-batch-line-share').addEventListener('click', handleBatchLineShare);
 
-  // 履歴クリア
   $('btn-clear-history').addEventListener('click', () => {
-    if (!confirm('この端末に保存されている作成履歴をクリアしますか？（スプレッドシート上のイベント自体は消えません）')) return;
+    if (!confirm('この端末の表示履歴のみをクリアしますか？（イベント本体を消す場合は各カードの「完全削除」を使ってください）')) return;
     localStorage.removeItem(STORAGE_MY_EVENTS);
     renderMyEventsHistory();
   });
 
-  // ゲスト画面：条件メモクイックチップ
-  document.querySelectorAll('.memo-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      const ta = $('guest-condition-memo');
-      const addText = chip.dataset.text;
-      if (!ta.value.trim()) {
-        ta.value = addText;
-      } else if (!ta.value.includes(addText)) {
-        ta.value = `${ta.value.trim()} / ${addText}`;
-      }
-    });
-  });
-
-  // ゲスト画面：更新・送信
   $('btn-guest-refresh').addEventListener('click', () => loadEventAndRender());
   $('guest-form').addEventListener('submit', handleGuestSubmit);
 
-  // 幹事画面：各種操作
   $('btn-admin-refresh').addEventListener('click', () => loadEventAndRender());
   $('btn-admin-line-share').addEventListener('click', () => {
     if (!state.eventData) return;
@@ -309,43 +794,119 @@ function bindStaticEvents() {
     copyToClipboard(buildAdminUrl(state.currentEventId, state.currentAdminKey), '幹事用URLをコピーしました');
   });
   $('btn-open-guest-preview').addEventListener('click', () => {
-    window.open(buildGuestUrl(state.currentEventId), '_blank', 'noopener');
+    window.open(buildPreviewUrl(state.currentEventId), '_blank', 'noopener');
+  });
+
+  // 開催確定＆集合案内イベント
+  const onConfirmOptionChange = () => {
+    state.confirmCustomEdited = false;
+    refreshConfirmMessageText(true);
+  };
+  $('confirm-date-select').addEventListener('change', onConfirmOptionChange);
+  $('confirm-opt-include-maybe').addEventListener('change', onConfirmOptionChange);
+  $('confirm-opt-include-memo').addEventListener('change', onConfirmOptionChange);
+  $('confirm-extra-note').addEventListener('input', onConfirmOptionChange);
+
+  $('confirm-message-text').addEventListener('input', () => {
+    state.confirmCustomEdited = true;
+  });
+
+  $('btn-confirm-preview-toggle').addEventListener('click', () => {
+    const wrap = $('confirm-preview-wrap');
+    const isHidden = wrap.classList.toggle('hidden');
+    $('btn-confirm-preview-toggle').textContent = isHidden ? '文面を確認・編集' : 'プレビューを閉じる';
+    if (!isHidden) refreshConfirmMessageText();
+  });
+
+  $('btn-confirm-reset').addEventListener('click', () => {
+    state.confirmCustomEdited = false;
+    refreshConfirmMessageText(true);
+    showToast('自動生成された文面に戻しました');
+  });
+
+  $('btn-confirm-line-share').addEventListener('click', () => {
+    const msg = getCurrentConfirmMessage();
+    if (!msg) return;
+    openLineShare(msg);
+  });
+
+  $('btn-confirm-copy').addEventListener('click', () => {
+    const msg = getCurrentConfirmMessage();
+    if (!msg) return;
+    copyToClipboard(msg, '確定案内文をコピーしました');
   });
 
   $('invited-memo-form').addEventListener('submit', handleAddInvitedMemo);
   $('toggle-manual-close').addEventListener('change', handleManualCloseToggle);
   $('btn-admin-save-settings').addEventListener('click', handleAdminSaveSettings);
-  $('btn-admin-delete-event').addEventListener('click', handleAdminDeleteEvent);
+  $('btn-admin-delete-event').addEventListener('click', () => {
+    handleDeleteEventByIds(state.currentEventId, state.currentAdminKey, state.eventData?.event?.title || '', true);
+  });
+}
+
+function openMultiPickForContainer(mode) {
+  const container = mode === 'single' ? $('single-rows') : $('multi-rows');
+  const existingDates = Array.from(container.querySelectorAll('.inp-date')).map(el => el.value);
+  const existingSet = new Set(existingDates);
+  const timeDefaults = getLastRowTime(container, mode === 'single' ? '19' : '');
+
+  openCalendarMulti(existingDates, (pickedDates) => {
+    let added = 0;
+    pickedDates.forEach(dateStr => {
+      if (existingSet.has(dateStr)) return;
+      if (mode === 'single') {
+        addSingleDateRow(dateStr, timeDefaults.sh, timeDefaults.sm, timeDefaults.eh, timeDefaults.em);
+      } else {
+        addMultiDateRow(dateStr, timeDefaults.sh, timeDefaults.sm, timeDefaults.eh, timeDefaults.em);
+      }
+      existingSet.add(dateStr);
+      added++;
+    });
+    if (added > 0) {
+      showToast(`${added}日分の日程を追加しました`);
+    } else {
+      showToast('選択した日付は既に追加済みです');
+    }
+  });
 }
 
 /* =====================================================
    ビュー1：イベント作成画面
 ===================================================== */
-function getTodayStr(offsetDays = 0) {
-  const dt = new Date();
-  dt.setDate(dt.getDate() + offsetDays);
-  const y = dt.getFullYear();
-  const m = String(dt.getMonth() + 1).padStart(2, '0');
-  const d = String(dt.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-function initCreateView() {
+async function initCreateView() {
   hideAllViews();
   $('view-create').classList.remove('hidden');
 
+  renderLocationHistoryChips();
+
   $('single-rows').innerHTML = '';
   $('multi-rows').innerHTML = '';
-  addSingleDateRow(getTodayStr(1), '13:00〜19:00');
-  addMultiDateRow(getTodayStr(1), '13:00〜');
-  addMultiDateRow(getTodayStr(2), '13:00〜');
+  addSingleDateRow(getTodayStr(1), '13', '00', '19', '00');
+  addMultiDateRow(getTodayStr(1), '13', '00', '', '00');
+  addMultiDateRow(getTodayStr(2), '13', '00', '', '00');
+
+  if (state.lineProfile) {
+    try {
+      const res = await apiGet({
+        action: 'list_my_events',
+        line_uid: state.lineProfile.userId
+      });
+      if (res.ok && Array.isArray(res.events)) {
+        state.cloudMyEvents = res.events;
+      }
+    } catch (e) {
+      console.warn('作成済みイベント同期エラー:', e);
+    }
+  }
 
   renderMyEventsHistory();
 }
 
-function addSingleDateRow(defaultDate = '', defaultTime = '') {
+function addSingleDateRow(defaultDate = '', sh = '13', sm = '00', eh = '19', em = '00') {
   const container = $('single-rows');
+  const dateVal = defaultDate || getTodayStr(container.children.length + 1);
   const idx = container.children.length + 1;
+
   const div = document.createElement('div');
   div.className = 'date-row-card';
   div.innerHTML = `
@@ -353,18 +914,20 @@ function addSingleDateRow(defaultDate = '', defaultTime = '') {
       <span class="row-num">日程 #${idx}</span>
       <button type="button" class="btn-remove-row">削除</button>
     </div>
-    <div class="date-row-grid">
-      <div>
-        <input type="date" class="inp-date" value="${escapeHtml(defaultDate)}" required />
-      </div>
-      <div>
-        <input type="text" class="inp-time" value="${escapeHtml(defaultTime)}" placeholder="時間（例：13:00〜19:00）" />
-      </div>
-    </div>
+    <input type="hidden" class="inp-date" value="${escapeHtml(dateVal)}" />
+    <button type="button" class="date-picker-btn">
+      <span class="date-picker-text">${escapeHtml(formatDateButtonLabel(dateVal))}</span>
+      <span class="cal-icon">カレンダー変更</span>
+    </button>
+    ${buildTimeSelectHtml(sh, sm, eh, em)}
     <div class="date-row-loc">
       <input type="text" class="inp-row-location" placeholder="場所をこの日だけ変更する場合に入力（空欄なら上の場所を適用）" />
     </div>
   `;
+
+  bindDatePickerToRow(div);
+  bindTimeSelectEvents(div);
+
   div.querySelector('.btn-remove-row').addEventListener('click', () => {
     if (container.children.length <= 1) {
       showToast('日程は最低1件必要です');
@@ -373,13 +936,16 @@ function addSingleDateRow(defaultDate = '', defaultTime = '') {
     div.remove();
     renumberRows(container, '日程');
   });
+
   container.appendChild(div);
   renumberRows(container, '日程');
 }
 
-function addMultiDateRow(defaultDate = '', defaultTime = '') {
+function addMultiDateRow(defaultDate = '', sh = '13', sm = '00', eh = '', em = '00') {
   const container = $('multi-rows');
+  const dateVal = defaultDate || getTodayStr(container.children.length + 1);
   const idx = container.children.length + 1;
+
   const div = document.createElement('div');
   div.className = 'date-row-card';
   div.innerHTML = `
@@ -387,15 +953,17 @@ function addMultiDateRow(defaultDate = '', defaultTime = '') {
       <span class="row-num">候補 #${idx}</span>
       <button type="button" class="btn-remove-row">削除</button>
     </div>
-    <div class="date-row-grid">
-      <div>
-        <input type="date" class="inp-date" value="${escapeHtml(defaultDate)}" required />
-      </div>
-      <div>
-        <input type="text" class="inp-time" value="${escapeHtml(defaultTime)}" placeholder="時間（例：19:00〜終電）" />
-      </div>
-    </div>
+    <input type="hidden" class="inp-date" value="${escapeHtml(dateVal)}" />
+    <button type="button" class="date-picker-btn">
+      <span class="date-picker-text">${escapeHtml(formatDateButtonLabel(dateVal))}</span>
+      <span class="cal-icon">カレンダー変更</span>
+    </button>
+    ${buildTimeSelectHtml(sh, sm, eh, em)}
   `;
+
+  bindDatePickerToRow(div);
+  bindTimeSelectEvents(div);
+
   div.querySelector('.btn-remove-row').addEventListener('click', () => {
     if (container.children.length <= 1) {
       showToast('候補日は最低1件必要です');
@@ -404,8 +972,22 @@ function addMultiDateRow(defaultDate = '', defaultTime = '') {
     div.remove();
     renumberRows(container, '候補');
   });
+
   container.appendChild(div);
   renumberRows(container, '候補');
+}
+
+function bindDatePickerToRow(rowEl) {
+  const hiddenInp = rowEl.querySelector('.inp-date');
+  const btn = rowEl.querySelector('.date-picker-btn');
+  const textSpan = rowEl.querySelector('.date-picker-text');
+
+  btn.addEventListener('click', () => {
+    openCalendarSingle(hiddenInp.value, (pickedStr) => {
+      hiddenInp.value = pickedStr;
+      textSpan.textContent = formatDateButtonLabel(pickedStr);
+    });
+  });
 }
 
 function renumberRows(container, prefix) {
@@ -417,15 +999,12 @@ function renumberRows(container, prefix) {
 
 async function handleCreateSubmit(e) {
   e.preventDefault();
-  if (!isApiConfigured()) {
-    showToast('engine.js に GAS_API_URL を設定してください');
-    return;
-  }
 
   const baseTitle = $('ev-title').value.trim();
   const baseLocation = $('ev-location').value.trim();
   const capacity = Number($('ev-capacity').value) || 4;
   const autoClose = $('ev-auto-close').checked;
+  const notifyMode = $('ev-notify-mode') ? $('ev-notify-mode').value : 'all';
   const note = $('ev-note').value.trim();
 
   if (!baseTitle) {
@@ -434,14 +1013,17 @@ async function handleCreateSubmit(e) {
   }
 
   const eventsPayload = [];
+  const locationsToSave = [];
+  if (baseLocation) locationsToSave.push(baseLocation);
 
   if (state.createMode === 'single') {
     const rows = Array.from($('single-rows').children);
     rows.forEach(row => {
       const date = row.querySelector('.inp-date').value.trim();
-      const time = row.querySelector('.inp-time').value.trim();
+      const time = readTimeFromRow(row);
       const rowLoc = row.querySelector('.inp-row-location').value.trim();
-      if (!date && !time) return;
+      if (!date) return;
+      if (rowLoc) locationsToSave.push(rowLoc);
       const titleSuffix = rows.length > 1 ? ` (${formatDateLabel(date, '')})` : '';
       eventsPayload.push({
         mode: 'single',
@@ -450,6 +1032,7 @@ async function handleCreateSubmit(e) {
         capacity,
         note,
         auto_close: autoClose,
+        notify_mode: notifyMode,
         dates: [{ date, time }]
       });
     });
@@ -457,11 +1040,11 @@ async function handleCreateSubmit(e) {
     const rows = Array.from($('multi-rows').children);
     const dates = rows.map(row => ({
       date: row.querySelector('.inp-date').value.trim(),
-      time: row.querySelector('.inp-time').value.trim()
-    })).filter(d => d.date || d.time);
+      time: readTimeFromRow(row)
+    })).filter(d => d.date);
 
     if (dates.length === 0) {
-      showToast('候補日を1件以上入力してください');
+      showToast('候補日を1件以上選択してください');
       return;
     }
     eventsPayload.push({
@@ -471,22 +1054,33 @@ async function handleCreateSubmit(e) {
       capacity,
       note,
       auto_close: autoClose,
+      notify_mode: notifyMode,
       dates
     });
   }
 
   if (eventsPayload.length === 0) {
-    showToast('有効な日程を入力してください');
+    showToast('有効な日程を選択してください');
     return;
   }
 
   showLoading('イベントを作成中...');
   try {
-    const res = await apiPost({ action: 'create_events', events: eventsPayload });
+    const res = await apiPost({
+      action: 'create_events',
+      admin_line_id: state.lineProfile?.userId || '',
+      admin_name: state.lineProfile?.displayName || '',
+      events: eventsPayload
+    });
     if (!res.ok) throw new Error(res.error || '作成に失敗しました');
 
+    locationsToSave.forEach(loc => saveLocationToHistory(loc));
+
     state.lastCreated = res.created || [];
-    state.lastCreated.forEach(ev => addMyEventHistory(ev));
+    state.lastCreated.forEach(ev => {
+      addMyEventHistory(ev);
+      if (state.lineProfile) state.cloudMyEvents.unshift(ev);
+    });
 
     renderCreatedResults(state.lastCreated);
     renderMyEventsHistory();
@@ -553,7 +1147,13 @@ function handleBatchLineShare() {
 }
 
 function renderMyEventsHistory() {
-  const list = loadMyEvents();
+  const mergedMap = new Map();
+  state.cloudMyEvents.forEach(ev => mergedMap.set(ev.id, ev));
+  loadLocalMyEvents().forEach(ev => {
+    if (!mergedMap.has(ev.id)) mergedMap.set(ev.id, ev);
+  });
+  const list = Array.from(mergedMap.values());
+
   const sec = $('my-events-section');
   const container = $('my-events-list');
 
@@ -582,6 +1182,7 @@ function renderMyEventsHistory() {
         <a href="${adminUrl}" class="btn btn-primary btn-sm">幹事画面へ</a>
         <button type="button" class="btn btn-line btn-sm btn-hist-line">LINEで追加送信</button>
         <button type="button" class="btn btn-secondary btn-sm btn-hist-copy">招待URL</button>
+        <button type="button" class="btn btn-danger-outline btn-sm btn-hist-delete">完全削除</button>
       </div>
     `;
     div.querySelector('.btn-hist-line').addEventListener('click', () => {
@@ -590,28 +1191,61 @@ function renderMyEventsHistory() {
     div.querySelector('.btn-hist-copy').addEventListener('click', () => {
       copyToClipboard(buildGuestUrl(ev.id), '招待URLをコピーしました');
     });
+    div.querySelector('.btn-hist-delete').addEventListener('click', () => {
+      handleDeleteEventByIds(ev.id, ev.admin_key, ev.title, false);
+    });
     container.appendChild(div);
   });
+}
+
+async function handleDeleteEventByIds(eventId, adminKey, title, redirectAfter) {
+  const label = title ? `「${title}」` : 'このイベント';
+  if (!confirm(`${label}とすべての回答データをスプレッドシートから完全に削除します。よろしいですか？`)) return;
+
+  showLoading('スプレッドシートから削除中...');
+  try {
+    const res = await apiPost({
+      action: 'admin_delete_event',
+      event_id: eventId,
+      admin_key: adminKey || '',
+      line_user_id: state.lineProfile?.userId || ''
+    });
+    if (!res.ok) throw new Error(res.error || '削除に失敗しました');
+
+    removeMyEventHistory(eventId);
+    state.lastCreated = state.lastCreated.filter(e => e.id !== eventId);
+    showToast('スプレッドシートから完全に削除しました');
+
+    if (redirectAfter) {
+      window.location.href = getBaseUrl();
+    } else {
+      renderMyEventsHistory();
+      if (state.lastCreated.length === 0) {
+        $('create-result').classList.add('hidden');
+      } else {
+        renderCreatedResults(state.lastCreated);
+      }
+    }
+  } catch (err) {
+    alert('削除エラー: ' + err.message);
+  } finally {
+    hideLoading();
+  }
 }
 
 /* =====================================================
    イベントデータ取得＆画面振り分け
 ===================================================== */
 async function loadEventAndRender() {
-  if (!isApiConfigured()) {
-    showErrorView('engine.js の先頭にある GAS_API_URL が未設定です。');
-    return;
-  }
-
   showLoading('イベント情報を読み込み中...');
   try {
     const params = { action: 'get_event', id: state.currentEventId };
-    if (state.currentAdminKey) {
-      params.key = state.currentAdminKey;
-    } else {
-      const myRid = getMyResponseId(state.currentEventId);
-      if (myRid) params.my_rid = myRid;
-    }
+    if (state.currentAdminKey) params.key = state.currentAdminKey;
+    if (state.lineProfile?.userId) params.line_uid = state.lineProfile.userId;
+    if (state.forcePreview) params.preview = '1';
+
+    const myRid = getMyResponseId(state.currentEventId);
+    if (myRid) params.my_rid = myRid;
 
     const res = await apiGet(params);
     if (!res.ok) {
@@ -621,6 +1255,7 @@ async function loadEventAndRender() {
 
     state.eventData = res;
     if (res.is_admin) {
+      if (res.admin_key) state.currentAdminKey = res.admin_key;
       state.invitedMemo = Array.isArray(res.invited_memo) ? res.invited_memo : [];
       renderAdminView(res);
     } else {
@@ -645,6 +1280,7 @@ function renderEventMeta(metaEl, noteBoxEl, ev) {
   }
   items.push({ label: '場所', val: ev.location || '未定（幹事へ確認）' });
   items.push({ label: '定員', val: `${ev.capacity}名` });
+  if (ev.admin_name) items.push({ label: '幹事', val: ev.admin_name });
 
   metaEl.innerHTML = items.map(it => `
     <div class="meta-item">
@@ -670,8 +1306,8 @@ function renderGuestView(data) {
   $('guest-title').textContent = ev.title;
   renderEventMeta($('guest-meta'), $('guest-note-box'), ev);
 
-  // バッジ判定
   const badges = [];
+  if (state.forcePreview) badges.push('<span class="badge badge-admin">招待画面プレビュー中</span>');
   if (ev.is_closed) {
     badges.push('<span class="badge badge-closed">受付終了</span>');
   } else if (ev.mode === 'single') {
@@ -686,7 +1322,6 @@ function renderGuestView(data) {
   }
   $('guest-badges').innerHTML = badges.join('');
 
-  // 人数サマリー（名前は絶対に出さない）
   const statusArea = $('guest-status-area');
   if (ev.mode === 'single') {
     const dId = ev.dates[0].id;
@@ -728,7 +1363,6 @@ function renderGuestView(data) {
     }).join('');
   }
 
-  // 既存回答または記憶した名前の復元
   state.guestAnswers = {};
   if (myRes) {
     $('guest-name').value = myRes.name;
@@ -738,16 +1372,13 @@ function renderGuestView(data) {
     $('btn-guest-submit').textContent = '回答を更新する';
     $('guest-saved-hint').classList.remove('hidden');
   } else {
-    const savedName = localStorage.getItem(STORAGE_GUEST_NAME) || '';
-    if (savedName && !$('guest-name').value) {
-      $('guest-name').value = savedName;
-    }
+    const autoName = state.lineProfile?.displayName || localStorage.getItem(STORAGE_GUEST_NAME) || '';
+    if (autoName && !$('guest-name').value) $('guest-name').value = autoName;
     $('guest-form-title').textContent = '出欠を回答する';
     $('btn-guest-submit').textContent = '回答を送信する';
     $('guest-saved-hint').classList.add('hidden');
   }
 
-  // 締切バナー
   const closedBanner = $('guest-closed-banner');
   if (ev.is_closed) {
     closedBanner.textContent = 'このイベントは幹事によって受付が締め切られています。';
@@ -846,7 +1477,8 @@ async function handleGuestSubmit(e) {
       name,
       answers: state.guestAnswers,
       condition_memo: conditionMemo,
-      response_id: existingRid
+      response_id: existingRid,
+      line_user_id: state.lineProfile?.userId || ''
     });
 
     if (!res.ok) {
@@ -874,14 +1506,11 @@ function renderAdminView(data) {
   $('view-admin').classList.remove('hidden');
 
   const { event: ev, counts, responses = [] } = data;
-
-  // 履歴にも保存（別端末で幹事URLを開いた場合にも対応）
   addMyEventHistory({ ...ev, admin_key: state.currentAdminKey });
 
   $('admin-title').textContent = ev.title;
   renderEventMeta($('admin-meta'), $('admin-note-box'), ev);
 
-  // ステータスバッジ
   const stBadge = $('admin-status-badge');
   if (ev.is_closed) {
     stBadge.textContent = '手動締切中';
@@ -894,15 +1523,17 @@ function renderAdminView(data) {
     stBadge.className = 'badge badge-open';
   }
 
-  // 設定フォーム反映
   $('toggle-manual-close').checked = Boolean(ev.is_closed);
   $('admin-edit-capacity').value = ev.capacity;
   $('admin-edit-location').value = ev.location;
   $('admin-edit-auto-close').checked = Boolean(ev.auto_close);
+  if ($('admin-edit-notify-mode')) {
+    $('admin-edit-notify-mode').value = ev.notify_mode || 'all';
+  }
   $('admin-edit-note').value = ev.note;
 
-  // 集計＋回答者詳細描画
   renderAdminResponses(ev, counts, responses);
+  setupConfirmSection(ev, counts);
   renderInvitedMemoList(responses);
 }
 
@@ -969,7 +1600,6 @@ function renderAdminResponses(ev, counts, responses) {
       });
     });
   } else {
-    // 複数候補日モード：マトリクス表
     summaryEl.innerHTML = ev.dates.map(d => {
       const c = counts[d.id] || { ok: 0, maybe: 0, ng: 0 };
       const rem = Math.max(0, ev.capacity - c.ok);
@@ -1049,6 +1679,7 @@ async function handleDeleteResponse(resp) {
       action: 'admin_delete_response',
       event_id: state.currentEventId,
       admin_key: state.currentAdminKey,
+      line_user_id: state.lineProfile?.userId || '',
       response_id: resp.response_id
     });
     if (!res.ok) throw new Error(res.error || '削除に失敗しました');
@@ -1137,6 +1768,7 @@ async function persistInvitedMemo() {
       action: 'admin_update',
       event_id: state.currentEventId,
       admin_key: state.currentAdminKey,
+      line_user_id: state.lineProfile?.userId || '',
       updates: { invited_memo: state.invitedMemo }
     });
     if (!res.ok) throw new Error(res.error);
@@ -1147,7 +1779,7 @@ async function persistInvitedMemo() {
 }
 
 /* =====================================================
-   幹事設定の保存・締切・イベント削除
+   幹事設定の保存・締切
 ===================================================== */
 async function handleManualCloseToggle() {
   const isClosed = $('toggle-manual-close').checked;
@@ -1157,6 +1789,7 @@ async function handleManualCloseToggle() {
       action: 'admin_update',
       event_id: state.currentEventId,
       admin_key: state.currentAdminKey,
+      line_user_id: state.lineProfile?.userId || '',
       updates: { is_closed: isClosed }
     });
     if (!res.ok) throw new Error(res.error);
@@ -1173,6 +1806,7 @@ async function handleAdminSaveSettings() {
   const capacity = Number($('admin-edit-capacity').value) || 4;
   const location = $('admin-edit-location').value.trim();
   const autoClose = $('admin-edit-auto-close').checked;
+  const notifyMode = $('admin-edit-notify-mode') ? $('admin-edit-notify-mode').value : 'all';
   const note = $('admin-edit-note').value.trim();
 
   showLoading('設定を保存中...');
@@ -1181,38 +1815,21 @@ async function handleAdminSaveSettings() {
       action: 'admin_update',
       event_id: state.currentEventId,
       admin_key: state.currentAdminKey,
+      line_user_id: state.lineProfile?.userId || '',
       updates: {
         capacity,
         location,
         auto_close: autoClose,
+        notify_mode: notifyMode,
         note
       }
     });
     if (!res.ok) throw new Error(res.error);
+    if (location) saveLocationToHistory(location);
     showToast('設定を保存しました');
     await loadEventAndRender();
   } catch (err) {
     alert('保存エラー: ' + err.message);
-  } finally {
-    hideLoading();
-  }
-}
-
-async function handleAdminDeleteEvent() {
-  if (!confirm('このイベントとすべての回答データを完全に削除します。よろしいですか？')) return;
-  showLoading('イベントを削除中...');
-  try {
-    const res = await apiPost({
-      action: 'admin_delete_event',
-      event_id: state.currentEventId,
-      admin_key: state.currentAdminKey
-    });
-    if (!res.ok) throw new Error(res.error);
-    removeMyEventHistory(state.currentEventId);
-    showToast('イベントを削除しました');
-    window.location.href = getBaseUrl();
-  } catch (err) {
-    alert('削除エラー: ' + err.message);
   } finally {
     hideLoading();
   }

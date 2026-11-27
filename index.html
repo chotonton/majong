@@ -18,10 +18,10 @@
   </header>
 
   <main class="container">
-    <!-- API URL未設定警告 -->
-    <div id="setup-warning" class="card warning-card hidden">
-      <h2>初期設定が必要です</h2>
-      <p><code>engine.js</code> の先頭にある <code>GAS_API_URL</code> に、Google Apps ScriptのウェブアプリURLを設定してください。</p>
+    <!-- LINEログイン状態バー -->
+    <div id="line-status-bar" class="line-status-bar hidden">
+      <span id="line-status-text"></span>
+      <button type="button" id="btn-line-login" class="btn btn-line btn-sm hidden">LINEログイン</button>
     </div>
 
     <!-- エラー表示ビュー -->
@@ -39,9 +39,8 @@
     <section id="view-create" class="hidden">
       <div class="card">
         <h1 class="section-title">セットイベントを作成</h1>
-        <p class="muted-text">作成すると「招待用URL（人数のみ表示）」と「幹事用URL（名前・条件メモ確認）」が発行されます。</p>
+        <p class="muted-text">作成すると「招待用URL（人数のみ表示）」と「幹事用URL（名前・条件メモ確認）」が発行されます。開催から7日経過したイベントは自動削除されます。</p>
 
-        <!-- モード切替 -->
         <div class="mode-tabs" role="tablist">
           <button type="button" class="mode-tab active" data-mode="single">
             <strong>単日開催</strong>
@@ -63,6 +62,7 @@
             <div class="form-group flex-2">
               <label for="ev-location">場所（雀荘名・エリアなど）</label>
               <input type="text" id="ev-location" placeholder="例：雀荘〇〇 渋谷店" />
+              <div id="location-history-chips" class="quick-chips location-chips hidden"></div>
             </div>
             <div class="form-group flex-1">
               <label for="ev-capacity">定員（名）</label>
@@ -84,6 +84,15 @@
             </label>
           </div>
 
+          <div class="form-group">
+            <label for="ev-notify-mode">幹事へのLINE自動通知（前日リマインド連動）</label>
+            <select id="ev-notify-mode">
+              <option value="all" selected>回答・変更があるたびに通知</option>
+              <option value="full_only">満員になった時だけ通知（通数節約）</option>
+              <option value="off">通知しない（前日リマインドもOFF）</option>
+            </select>
+          </div>
+
           <!-- 日程入力エリア（単日モード：1件〜複数一括） -->
           <div id="single-dates-area" class="dates-panel">
             <div class="dates-panel-head">
@@ -91,9 +100,14 @@
               <span class="hint-badge">複数追加すると各日ごとに独立イベントを同時作成</span>
             </div>
             <div id="single-rows"></div>
-            <button type="button" id="btn-add-single-row" class="btn btn-secondary btn-sm btn-block">
-              ＋ 別日の単日イベントを同時に追加
-            </button>
+            <div class="date-add-actions">
+              <button type="button" id="btn-multi-pick-single" class="btn btn-primary btn-sm">
+                カレンダーから複数日まとめて追加
+              </button>
+              <button type="button" id="btn-add-single-row" class="btn btn-secondary btn-sm">
+                ＋ 1日追加
+              </button>
+            </div>
           </div>
 
           <!-- 日程入力エリア（複数候補日：日程調整モード） -->
@@ -103,9 +117,14 @@
               <span class="hint-badge">参加者が各日に ◯ / △ / ✕ で回答</span>
             </div>
             <div id="multi-rows"></div>
-            <button type="button" id="btn-add-multi-row" class="btn btn-secondary btn-sm btn-block">
-              ＋ 候補日を追加
-            </button>
+            <div class="date-add-actions">
+              <button type="button" id="btn-multi-pick-multi" class="btn btn-primary btn-sm">
+                カレンダーから複数日まとめて追加
+              </button>
+              <button type="button" id="btn-add-multi-row" class="btn btn-secondary btn-sm">
+                ＋ 候補を1件追加
+              </button>
+            </div>
           </div>
 
           <div class="form-group">
@@ -129,11 +148,11 @@
         <div id="created-list" class="created-list"></div>
       </div>
 
-      <!-- この端末で作ったイベント一覧（幹事ショートカット） -->
+      <!-- 自分が作成したイベント一覧 -->
       <div id="my-events-section" class="card hidden">
         <div class="card-head-row">
           <h2 class="section-title">自分が作成したイベント（幹事用）</h2>
-          <button type="button" id="btn-clear-history" class="btn-text-danger">履歴クリア</button>
+          <button type="button" id="btn-clear-history" class="btn-text-danger">表示履歴のみクリア</button>
         </div>
         <div id="my-events-list" class="my-events-list"></div>
       </div>
@@ -150,7 +169,6 @@
         <div id="guest-note-box" class="event-note hidden"></div>
       </div>
 
-      <!-- 人数サマリー（名前は非表示） -->
       <div class="card">
         <div class="card-head-row">
           <h2 class="section-title">現在の参加状況</h2>
@@ -160,7 +178,6 @@
         <p class="privacy-note">※参加者の名前・条件メモは幹事のみ確認できます。</p>
       </div>
 
-      <!-- 回答フォーム -->
       <div class="card">
         <h2 class="section-title" id="guest-form-title">出欠を回答する</h2>
         <div id="guest-closed-banner" class="banner banner-closed hidden"></div>
@@ -175,12 +192,6 @@
 
           <div class="form-group">
             <label for="guest-condition-memo">条件メモ（任意・幹事のみ閲覧）</label>
-            <div class="quick-chips memo-chips">
-              <button type="button" class="chip memo-chip" data-text="途中から合流可">途中から合流可</button>
-              <button type="button" class="chip memo-chip" data-text="終電まで">終電まで</button>
-              <button type="button" class="chip memo-chip" data-text="3麻でもOK">3麻でもOK</button>
-              <button type="button" class="chip memo-chip" data-text="時間調整相談">時間調整相談</button>
-            </div>
             <textarea id="guest-condition-memo" rows="2" placeholder="例：20時から合流できます / 23時上がり希望"></textarea>
           </div>
 
@@ -203,7 +214,6 @@
         <div class="meta-grid" id="admin-meta"></div>
         <div id="admin-note-box" class="event-note hidden"></div>
 
-        <!-- LINE送信＆URLコピー -->
         <div class="admin-share-box">
           <button type="button" id="btn-admin-line-share" class="btn btn-line btn-lg btn-block">
             LINEでフレンドに追加送信する
@@ -216,7 +226,7 @@
         </div>
       </div>
 
-      <!-- 回答者一覧（幹事のみ表示） -->
+      <!-- 出欠一覧（幹事限定） -->
       <div class="card">
         <div class="card-head-row">
           <h2 class="section-title">出欠一覧（幹事限定）</h2>
@@ -224,6 +234,48 @@
         </div>
         <div id="admin-summary-area"></div>
         <div id="admin-responses-area"></div>
+      </div>
+
+      <!-- 開催確定＆集合案内（ワンタップLINE送信） -->
+      <div class="card confirm-card" id="admin-confirm-card">
+        <h2 class="section-title">開催確定＆集合案内を送る</h2>
+        <p class="muted-text">◯参加メンバーと日時・場所をまとめた確定案内文を自動作成してLINE送信できます。</p>
+
+        <div id="confirm-date-wrap" class="form-group hidden">
+          <label for="confirm-date-select">開催確定する日程</label>
+          <select id="confirm-date-select"></select>
+        </div>
+
+        <div class="confirm-options">
+          <label class="checkbox-label">
+            <input type="checkbox" id="confirm-opt-include-maybe" />
+            <span>△保留メンバーも案内文に含める</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="confirm-opt-include-memo" />
+            <span>各メンバーの条件メモも含める</span>
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label for="confirm-extra-note">集合・予約メモ（任意・案内文に追記）</label>
+          <input type="text" id="confirm-extra-note" placeholder="例：〇〇の名前で予約済み／10分前に現地集合" />
+        </div>
+
+        <button type="button" id="btn-confirm-line-share" class="btn btn-line btn-lg btn-block">
+          開催確定＆集合案内をLINE送信
+        </button>
+
+        <div class="share-sub-btns">
+          <button type="button" id="btn-confirm-copy" class="btn btn-secondary btn-sm">案内文をコピー</button>
+          <button type="button" id="btn-confirm-preview-toggle" class="btn btn-secondary btn-sm">文面を確認・編集</button>
+        </div>
+
+        <div id="confirm-preview-wrap" class="confirm-preview-wrap hidden">
+          <label for="confirm-message-text">送信される文面（このまま直接編集できます）</label>
+          <textarea id="confirm-message-text" rows="9"></textarea>
+          <button type="button" id="btn-confirm-reset" class="btn-text-muted">自動生成文面に戻す</button>
+        </div>
       </div>
 
       <!-- 声かけ済みメモ（幹事専用） -->
@@ -238,7 +290,7 @@
         <div id="invited-memo-list" class="invited-memo-list"></div>
       </div>
 
-      <!-- イベント設定管理 -->
+      <!-- 受付・定員コントロール -->
       <div class="card">
         <h2 class="section-title">受付・定員コントロール</h2>
         <div class="control-row">
@@ -271,16 +323,55 @@
           </label>
         </div>
         <div class="form-group">
+          <label for="admin-edit-notify-mode">LINE自動通知設定（前日リマインド連動）</label>
+          <select id="admin-edit-notify-mode">
+            <option value="all">回答・変更があるたびに通知</option>
+            <option value="full_only">満員になった時だけ通知</option>
+            <option value="off">通知しない（前日リマインドもOFF）</option>
+          </select>
+        </div>
+        <div class="form-group">
           <label for="admin-edit-note">詳細メモ</label>
           <textarea id="admin-edit-note" rows="2"></textarea>
         </div>
         <div class="actions-row space-between">
           <button type="button" id="btn-admin-save-settings" class="btn btn-primary">設定を保存</button>
-          <button type="button" id="btn-admin-delete-event" class="btn btn-danger-outline btn-sm">このイベントを削除</button>
+          <button type="button" id="btn-admin-delete-event" class="btn btn-danger-outline btn-sm">スプレッドシートから完全削除</button>
         </div>
       </div>
     </section>
   </main>
+
+  <!-- スマホ対応カスタムカレンダーモーダル（単日・複数連続タップ両対応） -->
+  <div id="calendar-modal" class="cal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="cal-sheet">
+      <div class="cal-header">
+        <button type="button" id="cal-prev" class="cal-nav-btn" aria-label="前の月">◀</button>
+        <div class="cal-month-wrap">
+          <strong id="cal-month-title"></strong>
+          <button type="button" id="cal-today" class="cal-today-btn">今月</button>
+        </div>
+        <button type="button" id="cal-next" class="cal-nav-btn" aria-label="次の月">▶</button>
+      </div>
+      <div id="cal-multi-hint" class="cal-multi-hint hidden">
+        追加したい日付を連続タップで選んでください（月移動しても選択を維持します）
+      </div>
+      <div class="cal-weekdays">
+        <span class="sun">日</span>
+        <span>月</span>
+        <span>火</span>
+        <span>水</span>
+        <span>木</span>
+        <span>金</span>
+        <span class="sat">土</span>
+      </div>
+      <div id="cal-grid" class="cal-grid"></div>
+      <div class="cal-footer">
+        <button type="button" id="cal-confirm-multi" class="btn btn-primary btn-block hidden">選択した日付を追加</button>
+        <button type="button" id="cal-close" class="btn btn-secondary btn-block">閉じる</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ローディング＆トースト -->
   <div id="loading-overlay" class="loading-overlay hidden">
@@ -289,6 +380,7 @@
   </div>
   <div id="toast" class="toast hidden"></div>
 
+  <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
   <script src="engine.js"></script>
 </body>
 </html>
