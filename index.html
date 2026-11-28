@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>麻雀セット 出欠確認</title>
-  <link rel="stylesheet" href="style.css?v=20261128v2" />
+  <title>麻雀セット出欠確認表</title>
+  <link rel="stylesheet" href="style.css?v=20261128v3" />
 </head>
 <body>
   <header class="app-header">
     <div class="header-inner">
       <a href="?" class="brand">
         <span class="brand-tile">發</span>
-        <span>麻雀セット出欠</span>
+        <span>麻雀セット出欠確認表</span>
       </a>
       <div class="header-actions">
         <button id="btn-go-home" class="btn btn-sm btn-outline-light hidden" type="button">一覧へ</button>
@@ -53,7 +53,6 @@
           </div>
           <div class="dashboard-head-btns">
             <button type="button" id="btn-home-refresh" class="btn btn-secondary btn-sm">最新に更新</button>
-            <button type="button" id="btn-home-create" class="btn btn-primary btn-sm">＋ イベント新規作成</button>
           </div>
         </div>
 
@@ -100,9 +99,8 @@
         </div>
 
         <div id="dashboard-empty" class="empty-box hidden">
-          <p class="empty-title">このブラウザで管理しているイベントはまだありません</p>
-          <p class="muted-text">「イベントを新規作成」から作成すると、ここに一覧表示されます。（※LINE連携前は作成した同じブラウザごとに管理されます）</p>
-          <button type="button" id="btn-empty-create" class="btn btn-primary btn-lg">＋ イベントを新規作成する</button>
+          <p class="empty-title">イベントはまだありません</p>
+          <p class="muted-text" style="margin-bottom:0;">右上の「＋ 新規作成」から作成してください。</p>
         </div>
 
         <div id="dashboard-filter-empty" class="filter-empty-msg hidden">
@@ -185,6 +183,11 @@
           </div>
 
           <div class="form-group">
+            <label for="ev-fee">セット料金（任意）</label>
+            <input type="text" id="ev-fee" placeholder="例：1時間 1,200円（1人300円）／ パック 1人 2,000円" />
+          </div>
+
+          <div class="form-group">
             <label class="checkbox-label">
               <input type="checkbox" id="ev-auto-close" checked />
               <span>定員に達したら自動で「満員（キャンセル待ち）」にして新規参加を締め切る</span>
@@ -249,7 +252,7 @@
           <h2 class="section-title">イベントを作成しました</h2>
           <button type="button" id="btn-result-go-home" class="btn btn-secondary btn-sm">イベント一覧へ</button>
         </div>
-        <p class="muted-text">フレンドへ招待を送るか、「詳細を開く」から送信先を記録しながらLINE送信できます。</p>
+        <p class="muted-text">フレンドへ招待を送るか、「詳細を開く」から管理画面へ移動できます。</p>
         <div id="batch-line-wrap" class="batch-line-wrap hidden">
           <button type="button" id="btn-batch-line-share" class="btn btn-line btn-block">
             作成した全日程をまとめてLINEで送る
@@ -331,42 +334,23 @@
         <div id="admin-note-box" class="event-note hidden"></div>
       </div>
 
-      <!-- LINE招待送信 ＆ 送信済み把握（誤送信防止） -->
+      <!-- LINE招待送信（シンプル誤送信防止） -->
       <div class="card invite-manage-card">
         <div class="card-head-row">
-          <h2 class="section-title">LINEで招待を送る（誤送信防止）</h2>
-          <span id="invited-memo-count" class="badge">送信済 0名</span>
+          <h2 class="section-title">LINEで招待を送る</h2>
+          <span id="invite-sent-badge" class="badge">未送信</span>
         </div>
-        <p class="muted-text">送る相手の名前を入れてから送信すると送信日時が自動記録され、重複送信を警告します。</p>
+        <p id="invite-last-sent-info" class="muted-text hidden" style="margin-bottom:10px;"></p>
 
-        <div class="form-group">
-          <label for="invite-target-names">これから招待を送る相手（複数なら「、」区切り／空欄のまま送信も可）</label>
-          <input type="text" id="invite-target-names" placeholder="例：佐藤、田中" />
-          <div id="friend-history-chips" class="quick-chips location-chips hidden"></div>
-        </div>
-
-        <div class="invite-send-actions">
-          <button type="button" id="btn-admin-line-share" class="btn btn-line btn-lg">
-            記録してLINEで招待を送る
-          </button>
-          <button type="button" id="btn-invite-record-only" class="btn btn-secondary btn-sm">
-            送信済みに記録のみ追加
-          </button>
-        </div>
+        <button type="button" id="btn-admin-line-share" class="btn btn-line btn-lg btn-block">
+          LINEで招待を送る
+        </button>
 
         <div class="share-sub-btns">
           <button type="button" id="btn-copy-guest-url" class="btn btn-secondary btn-sm">招待URLコピー</button>
           <button type="button" id="btn-copy-admin-url" class="btn btn-secondary btn-sm">幹事URLコピー</button>
           <button type="button" id="btn-open-guest-preview" class="btn btn-secondary btn-sm">招待画面を見る</button>
         </div>
-
-        <hr class="divider" />
-
-        <div class="sent-list-head">
-          <strong>招待URLを送信済みのフレンド一覧</strong>
-          <span class="muted-inline">※回答一覧の名前と自動照合します</span>
-        </div>
-        <div id="invited-memo-list" class="invited-memo-list"></div>
       </div>
 
       <!-- 出欠一覧（幹事限定） -->
@@ -379,34 +363,22 @@
         <div id="admin-responses-area"></div>
       </div>
 
-      <!-- 開催確定＆集合案内 -->
+      <!-- 開催確定・数日前の再確認の案内 -->
       <div class="card confirm-card" id="admin-confirm-card">
-        <h2 class="section-title">開催確定＆集合案内を送る</h2>
-        <p class="muted-text">◯参加メンバーと日時・場所をまとめた確定案内をLINE送信できます。</p>
+        <h2 class="section-title">開催確定・再確認の案内を送る</h2>
 
         <div id="confirm-date-wrap" class="form-group hidden">
-          <label for="confirm-date-select">開催確定する日程</label>
+          <label for="confirm-date-select">案内する日程</label>
           <select id="confirm-date-select"></select>
         </div>
 
-        <div class="confirm-options">
-          <label class="checkbox-label">
-            <input type="checkbox" id="confirm-opt-include-maybe" />
-            <span>△保留メンバーも案内に含める</span>
-          </label>
-          <label class="checkbox-label">
-            <input type="checkbox" id="confirm-opt-include-memo" />
-            <span>各メンバーの条件メモも含める</span>
-          </label>
-        </div>
-
-        <div class="form-group">
-          <label for="confirm-extra-note">集合・予約メモ（任意・案内に追記）</label>
-          <input type="text" id="confirm-extra-note" placeholder="例：〇〇の名前で予約済み／10分前に現地集合" />
+        <div class="notice-tabs" role="tablist">
+          <button type="button" class="notice-tab active" data-notice-type="confirm">開催確定の案内</button>
+          <button type="button" class="notice-tab" data-notice-type="reconfirm">数日前の再確認</button>
         </div>
 
         <button type="button" id="btn-confirm-line-share" class="btn btn-line btn-lg btn-block">
-          開催確定＆集合案内をLINE送信
+          この案内をLINEで送る
         </button>
 
         <div class="share-sub-btns">
@@ -415,9 +387,9 @@
         </div>
 
         <div id="confirm-preview-wrap" class="confirm-preview-wrap hidden">
-          <label for="confirm-message-text">送信される文面（このまま直接編集できます）</label>
-          <textarea id="confirm-message-text" rows="9"></textarea>
-          <button type="button" id="btn-confirm-reset" class="btn-text-muted">自動生成文面に戻す</button>
+          <label for="confirm-message-text">送信される文面（直接編集できます）</label>
+          <textarea id="confirm-message-text" rows="8"></textarea>
+          <button type="button" id="btn-confirm-reset" class="btn-text-muted">例文に戻す</button>
         </div>
       </div>
 
@@ -451,6 +423,11 @@
             <label for="admin-edit-location">場所</label>
             <input type="text" id="admin-edit-location" />
           </div>
+        </div>
+
+        <div class="form-group">
+          <label for="admin-edit-fee">セット料金</label>
+          <input type="text" id="admin-edit-fee" placeholder="例：1時間 1,200円（1人300円）" />
         </div>
 
         <div class="dates-panel" style="margin-top:8px;">
@@ -534,6 +511,6 @@
   <div id="toast" class="toast hidden"></div>
 
   <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
-  <script src="engine.js?v=20261128v2"></script>
+  <script src="engine.js?v=20261128v3"></script>
 </body>
 </html>

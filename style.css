@@ -76,7 +76,7 @@ body {
   color: #fff;
   text-decoration: none;
   font-weight: 700;
-  font-size: 1.06rem;
+  font-size: 1.04rem;
 }
 
 .brand-tile {
@@ -186,12 +186,6 @@ body {
   font-size: 0.92rem;
 }
 
-.muted-inline {
-  font-size: 0.8rem;
-  color: var(--muted);
-  font-weight: 400;
-}
-
 /* =====================================================
    Filter Bar & Dashboard Table
 ===================================================== */
@@ -255,7 +249,7 @@ body {
 
 .empty-box {
   text-align: center;
-  padding: 32px 16px;
+  padding: 28px 16px;
   background: #f9fbfa;
   border: 1px dashed var(--border);
   border-radius: 10px;
@@ -263,7 +257,7 @@ body {
 
 .empty-title {
   margin: 0 0 6px;
-  font-size: 1.06rem;
+  font-size: 1.05rem;
   font-weight: 700;
 }
 
@@ -517,13 +511,14 @@ body {
 }
 
 /* =====================================================
-   Mode Tabs & Forms
+   Mode Tabs & Notice Tabs
 ===================================================== */
-.mode-tabs {
+.mode-tabs,
+.notice-tabs {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .mode-tab {
@@ -558,6 +553,28 @@ body {
   color: var(--primary);
 }
 
+.notice-tab {
+  border: 2px solid var(--border);
+  background: #f9fbfa;
+  color: var(--text);
+  border-radius: 10px;
+  padding: 11px 10px;
+  font-size: 0.94rem;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s;
+}
+
+.notice-tab.active {
+  border-color: var(--line-green);
+  background: #ecfdf3;
+  color: #065f46;
+}
+
+/* =====================================================
+   Forms
+===================================================== */
 .form-group {
   margin-bottom: 14px;
 }
@@ -657,12 +674,6 @@ select:focus {
   padding: 4px 6px 4px 11px;
   font-size: 0.84rem;
   font-weight: 600;
-}
-
-.loc-chip.already-sent-chip {
-  border-color: #cbd5e1;
-  background: #f1f5f9;
-  color: #64748b;
 }
 
 .loc-chip-text {
@@ -1004,7 +1015,7 @@ select:focus {
 }
 
 .meta-label {
-  min-width: 56px;
+  min-width: 72px;
   color: var(--muted);
   font-weight: 600;
   flex-shrink: 0;
@@ -1255,94 +1266,6 @@ select:focus {
 
 .share-sub-btns .btn {
   flex: 1 1 120px;
-}
-
-/* Invite Manage (誤送信防止) */
-.invite-send-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.sent-list-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 10px;
-  font-size: 0.94rem;
-}
-
-.memo-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-bottom: 6px;
-  background: #fafcfb;
-}
-
-.memo-row-left {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.memo-sent-time {
-  font-size: 0.78rem;
-  color: var(--muted);
-}
-
-.memo-status-badge {
-  display: inline-block;
-  border: none;
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 0.78rem;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.memo-status-ok {
-  background: var(--ok-bg);
-  color: var(--ok);
-}
-
-.memo-status-maybe {
-  background: var(--maybe-bg);
-  color: var(--maybe);
-}
-
-.memo-status-ng {
-  background: var(--ng-bg);
-  color: var(--ng);
-}
-
-.memo-status-wait {
-  background: #fef3c7;
-  color: #b45309;
-}
-
-.memo-status-done {
-  background: #dcfce7;
-  color: #15803d;
-}
-
-/* Confirm Section */
-.confirm-options {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
-  padding: 10px 12px;
-  background: #f8faf9;
-  border: 1px solid var(--border);
-  border-radius: 8px;
 }
 
 .confirm-preview-wrap {
